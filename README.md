@@ -3,6 +3,17 @@
 VM Ubuntu 22.04 LTS sur Azure, déployée par Terraform.
 Prête à l'emploi pour **DevOps / CI-CD / Pentest / DataOps / SRE**.
 
+## Objectif
+
+Ce projet s'adresse aux étudiants et aux professionnels qui souhaitent disposer rapidement d'un environnement de travail complet, sans passer des heures à configurer leurs outils manuellement.
+En quelques minutes, Terraform déploie sur Azure une machine virtuelle Ubuntu 22.04 LTS entièrement préconfigurée, couvrant les besoins suivants :
+
+- DevOps et CI/CD : Docker, Kubernetes, Terraform, Ansible, Vault, ArgoCD, GitHub Actions et bien d'autres.
+- Pentest et sécurité offensive : Metasploit, Nuclei, ffuf, sqlmap, Hydra, Amass et un répertoire de travail dédié.
+- DataOps et Data Science : JupyterLab, Airflow, Spark, dbt, pandas, scikit-learn et les principaux SDKs cloud.
+- SRE et monitoring : Prometheus, Grafana, Node Exporter, Trivy et fail2ban préconfigurés.
+
+Que vous soyez en cours de formation, en stage ou en poste, cette VM vous permet de démarrer immédiatement sur un environnement standardisé, reproductible et prêt pour des cas d'usage réels.
 ---
 
 ## Structure des fichiers
