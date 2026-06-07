@@ -172,7 +172,7 @@ Conteneurs Docker démarrés automatiquement :
 | Qualité | black, flake8, mypy, isort, pylint, pytest |
 | Notebooks | JupyterLab - http://\<IP\>:8888 |
 
-### Securite — DevSecOps
+### Securite - DevSecOps
 
 | Outil | Description |
 |---|---|
