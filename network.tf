@@ -28,6 +28,7 @@ resource "azurerm_network_security_group" "nsg" {
   tags                = var.tags
 
   # ── SSH ──────────────────────────────────────────────────
+  # Restreint à votre IP uniquement (var.allowed_ssh_cidr)
   security_rule {
     name                       = "allow-ssh"
     priority                   = 100
@@ -66,7 +67,8 @@ resource "azurerm_network_security_group" "nsg" {
     destination_address_prefix = "*"
   }
 
-  # ── Jupyter Lab (Data Science) ───────────────────────────
+  # ── Jupyter Lab ──────────────────────────────────────────
+  # Restreint à var.allowed_ssh_cidr (jamais public)
   security_rule {
     name                       = "allow-jupyter"
     priority                   = 130
@@ -118,6 +120,49 @@ resource "azurerm_network_security_group" "nsg" {
     destination_address_prefix = "*"
   }
 
+  # ── Vault (HashiCorp) — ajouté depuis cloud-init ─────────
+  # API Vault sur 8200, UI sur 8200 également
+  security_rule {
+    name                       = "allow-vault"
+    priority                   = 170
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "8200"
+    source_address_prefix      = var.allowed_ssh_cidr
+    destination_address_prefix = "*"
+  }
+
+  # ── Node Exporter — monitoring interne uniquement ─────────
+  # Accessible uniquement depuis le VNet (Prometheus scrape)
+  security_rule {
+    name                       = "allow-node-exporter"
+    priority                   = 180
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "9100"
+    source_address_prefix      = var.vnet_address_space
+    destination_address_prefix = "*"
+  }
+
+  # ── Bases de données — internes au VNet uniquement ────────
+  # PostgreSQL, MySQL, Redis, MongoDB ne doivent JAMAIS
+  # être exposés publiquement. Accès VNet interne seulement.
+  security_rule {
+    name                       = "allow-db-internal"
+    priority                   = 190
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_ranges    = ["5432", "3306", "6379", "27017"]
+    source_address_prefix      = var.vnet_address_space
+    destination_address_prefix = "*"
+  }
+
   # ── Deny all other inbound ───────────────────────────────
   security_rule {
     name                       = "deny-all-inbound"
@@ -130,4 +175,10 @@ resource "azurerm_network_security_group" "nsg" {
     source_address_prefix      = "*"
     destination_address_prefix = "*"
   }
+}
+
+# ─── Association NSG → Subnet ────────────────────────────────
+resource "azurerm_subnet_network_security_group_association" "nsg_assoc" {
+  subnet_id                 = azurerm_subnet.subnet.id
+  network_security_group_id = azurerm_network_security_group.nsg.id
 }
