@@ -1,0 +1,28 @@
+# =============================================================
+#  terraform.tfvars.example — Copiez en terraform.tfvars
+# =============================================================
+
+resource_group_name = "rg-devops-pro-vm"
+location            = "westeurope"
+
+vm_name        = "devops-pro-vm"
+vm_size        = "Standard_B2ms"
+admin_username = "devopsadmin"
+
+os_disk_size_gb   = 64
+data_disk_size_gb = 64
+
+vnet_address_space    = "10.0.0.0/16"
+subnet_address_prefix = "10.0.1.0/24"
+vm_private_ip         = "10.0.1.10"
+dns_servers           = ["8.8.8.8", "1.1.1.1"]
+
+# ⚠️ Remplacez par votre IP : curl ifconfig.me
+allowed_ssh_cidr = "VOTRE_IP/32"
+
+tags = {
+  Environment = "Dev"
+  Project     = "DevOps-Pro-VM"
+  Owner       = "Student"
+  ManagedBy   = "Terraform"
+}
