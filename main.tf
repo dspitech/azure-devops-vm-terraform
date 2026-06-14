@@ -1,6 +1,6 @@
 # =============================================================
 #  AZURE DEVOPS / DATAOPS / NETWORK ADMIN PRO VM
-#  Ubuntu 22.04 LTS — Azure Students Subscription
+#  Ubuntu 22.04 LTS - Azure Students Subscription
 # =============================================================
 
 terraform {

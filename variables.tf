@@ -91,7 +91,7 @@ variable "dns_servers" {
 variable "allowed_ssh_cidr" {
   description = <<EOT
 CIDR autorisé pour SSH et outils (Jupyter, Grafana…).
-Par défaut ouvert — RESTREINDRE à votre IP en production :
+Par défaut ouvert - RESTREINDRE à votre IP en production :
   ex: "90.12.34.56/32"
 EOT
   type    = string
