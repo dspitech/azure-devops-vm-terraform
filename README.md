@@ -172,7 +172,7 @@ Une fois l'installation terminée, les services sont accessibles depuis votre IP
 |---|---|---|
 | JupyterLab | http://\<IP\>:8888 | Aucun (token désactivé) |
 | Grafana | http://\<IP\>:3000 | admin / admin |
-| Prometheus | http://\<IP\>:9090 | — |
+| Prometheus | http://\<IP\>:9090 | - |
 | Portainer | https://\<IP\>:9443 | Création au 1er accès |
 | Vault UI | http://\<IP\>:8200/ui | Root token dans `/root/.vault-init` |
 | Airflow | http://\<IP\>:8080 | admin / admin (démarrage manuel) |
@@ -193,7 +193,7 @@ Une fois l'installation terminée, les services sont accessibles depuis votre IP
 | k9s | Interface terminal Kubernetes interactive |
 | kubectx / kubens | Changement de contexte et namespace en une commande |
 | kind | Cluster Kubernetes local dans Docker |
-| Portainer | Interface web Docker — https://\<IP\>:9443 |
+| Portainer | Interface web Docker - https://\<IP\>:9443 |
 | Skaffold | Dev loop Kubernetes local (build/push/deploy automatisé) |
 | Stern | Tail de logs multi-pods Kubernetes |
 | cosign | Signature et vérification d'images OCI (supply chain security) |
@@ -206,7 +206,7 @@ Une fois l'installation terminée, les services sont accessibles depuis votre IP
 | Terragrunt | Wrapper Terraform pour configurations DRY multi-environnements |
 | Packer | Construction d'images machine reproductibles |
 | Ansible + ansible-lint + molecule | Automatisation de configuration et tests de rôles |
-| Vault | Gestion centralisée des secrets HashiCorp — http://\<IP\>:8200 |
+| Vault | Gestion centralisée des secrets HashiCorp - http://\<IP\>:8200 |
 
 ### Cloud et CI/CD
 
@@ -222,7 +222,7 @@ Une fois l'installation terminée, les services sont accessibles depuis votre IP
 | Outil | Accès | Description |
 |---|---|---|
 | Prometheus | http://\<IP\>:9090 | Collecte et stockage de métriques time-series |
-| Grafana | http://\<IP\>:3000 (admin/admin) | Dashboards de visualisation — préconfigurés avec Node Exporter |
+| Grafana | http://\<IP\>:3000 (admin/admin) | Dashboards de visualisation - préconfigurés avec Node Exporter |
 | Node Exporter | Port 9100 (interne VNet) | Métriques système CPU, RAM, disque, réseau |
 
 ### Bases de données
@@ -235,7 +235,7 @@ Conteneurs Docker démarrés automatiquement avec données persistées dans `/da
 |---|---|---|---|
 | PostgreSQL 16 | 127.0.0.1:5432 | postgres / postgres | postgres:16-alpine |
 | MySQL 8 | 127.0.0.1:3306 | root / root | mysql:8 |
-| Redis 7 | 127.0.0.1:6379 | — | redis:7-alpine |
+| Redis 7 | 127.0.0.1:6379 | - | redis:7-alpine |
 | MongoDB 7 | 127.0.0.1:27017 | admin / admin | mongo:7 |
 
 > Les conteneurs écoutent sur `127.0.0.1` uniquement pour éviter toute exposition publique, même si le NSG Azure filtre déjà au niveau réseau.
@@ -251,9 +251,9 @@ Conteneurs Docker démarrés automatiquement avec données persistées dans `/da
 | Bases de données | SQLAlchemy, psycopg2, pymysql, pymongo, redis |
 | Cloud | azure-storage-blob, azure-identity, boto3 |
 | Qualité | black, flake8, mypy, isort, pylint, pytest, pre-commit |
-| Notebooks | JupyterLab — http://\<IP\>:8888 |
+| Notebooks | JupyterLab - http://\<IP\>:8888 |
 
-### Sécurité — DevSecOps
+### Sécurité - DevSecOps
 
 | Outil | Description |
 |---|---|
@@ -262,7 +262,7 @@ Conteneurs Docker démarrés automatiquement avec données persistées dans `/da
 | fail2ban | Protection automatique contre le brute-force SSH |
 | ufw | Pare-feu applicatif (aligné sur les règles NSG Azure) |
 
-### Sécurité — Pentest et Sécurité Offensive
+### Sécurité - Pentest et Sécurité Offensive
 
 | Outil | Description |
 |---|---|
@@ -281,8 +281,8 @@ Conteneurs Docker démarrés automatiquement avec données persistées dans `/da
 | dirb | Discovery de répertoires et fichiers web |
 | enum4linux | Énumération d'informations Windows/Samba |
 | netdiscover / arp-scan | Découverte réseau ARP (hôtes actifs) |
-| SecLists | Wordlists de référence — `/opt/SecLists` |
-| rockyou.txt | Wordlist — `/usr/share/wordlists/rockyou.txt` |
+| SecLists | Wordlists de référence - `/opt/SecLists` |
+| rockyou.txt | Wordlist - `/usr/share/wordlists/rockyou.txt` |
 
 Répertoire de travail dédié : `/data/pentest/{recon,exploits,reports,loot}`
 
@@ -348,20 +348,20 @@ Récapitulatif des règles NSG définies dans `network.tf` :
 | 170 | 8200 | Vault | `allowed_ssh_cidr` uniquement |
 | 180 | 9100 | Node Exporter | CIDR VNet interne uniquement |
 | 190 | 5432, 3306, 6379, 27017 | Bases de données | CIDR VNet interne uniquement |
-| 4096 | `*` | Deny all | — |
+| 4096 | `*` | Deny all | - |
 
 > Le pare-feu UFW dans la VM est aligné sur ces mêmes règles (défense en profondeur).
 
 ---
 
-## Coût estimé (Azure Students — 100$/an de crédit)
+## Coût estimé (Azure Students - 100$/an de crédit)
 
 | Ressource | Taille | Coût/mois* |
 |---|---|---|
 | VM Standard_B2ms | 2 vCPU / 8 GB RAM | ~30$ |
-| Disque OS Premium SSD 64 GB | — | ~7$ |
-| Disque Données Premium SSD 64 GB | — | ~7$ |
-| IP Publique Standard | — | ~3$ |
+| Disque OS Premium SSD 64 GB | - | ~7$ |
+| Disque Données Premium SSD 64 GB | - | ~7$ |
+| IP Publique Standard | - | ~3$ |
 | **Total** | | **~47$/mois** |
 
 > Prix indicatifs région West Europe. **Éteignez la VM lorsqu'elle n'est pas utilisée** pour économiser votre crédit : `az vm deallocate -g rg-devops-pro-vm -n devops-pro-vm`
