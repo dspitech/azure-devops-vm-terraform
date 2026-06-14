@@ -98,7 +98,7 @@ tags = {
 
 Cette section explique chaque fichier Terraform et son rôle dans l'infrastructure.
 
-### 📋 provider.tf — Configuration des providers
+###  provider.tf - Configuration des providers
 
 **Rôle** : Configure les providers (AzureRM, Random, TLS) et leurs versions minimales.
 
@@ -144,7 +144,7 @@ provider "tls" {}
 
 ---
 
-### 📄 variables.tf — Définition des paramètres
+###  variables.tf - Définition des paramètres
 
 **Rôle** : Déclare toutes les variables Terraform utilisées dans le projet.
 
@@ -258,7 +258,7 @@ EOT
 
 ---
 
-### 🖇️ main.tf — Ressources centrales (VM, stockage, clés SSH)
+###  main.tf - Ressources centrales (VM, stockage, clés SSH)
 
 **Rôle** : Crée la machine virtuelle, les disques, les clés SSH, les IPs publiques et le groupe de ressources.
 
@@ -428,7 +428,7 @@ resource "azurerm_virtual_machine_data_disk_attachment" "attach_data" {
 
 ---
 
-### 🌐 network.tf — Réseau virtuel, sous-réseau, NSG (pare-feu)
+###  network.tf - Réseau virtuel, sous-réseau, NSG (pare-feu)
 
 **Rôle** : Configure le réseau Azure (VNet, Subnet, NSG avec règles pare-feu).
 
@@ -594,7 +594,7 @@ resource "azurerm_network_security_group" "nsg" {
 
 ---
 
-### 📤 outputs.tf — Valeurs de sortie (IPs, URLs, commandes SSH)
+###  outputs.tf - Valeurs de sortie (IPs, URLs, commandes SSH)
 
 **Rôle** : Affiche les informations essentielles après `terraform apply` (IPs, URLs des services, commandes de connexion).
 
@@ -662,17 +662,7 @@ output "resource_group_name" {
 
 ### 1. Connexion Azure
 
-```bash
-az login
-az account show   # Vérifiez que l'abonnement Students est sélectionné
-```
-
-Si plusieurs abonnements :
-
-```bash
-az account list --output table
-az account set --subscription "Azure for Students"
-```
+Lancer le cloud Shell depuis le portal Azure et choisir PowerSehll.
 
 ### 2. Cloner et configurer
 
@@ -940,7 +930,7 @@ Récapitulatif des règles NSG définies dans `network.tf` :
 
 **Rôle** : Script d'initialisation automatique exécuté au démarrage de la VM via `cloud-init` (user data Terraform). Il installe et configure tous les logiciels en 12 phases logiques.
 
-### 📋 Phases d'installation
+###  Phases d'installation
 
 | Phase | Durée | Description |
 |---|---|---|
@@ -958,7 +948,7 @@ Récapitulatif des règles NSG définies dans `network.tf` :
 | **[11/12]** | ~2 min | Pentest tools : Nuclei, ffuf, gobuster, Amass, theHarvester, Metasploit, Hydra, sqlmap, John, etc. |
 | **[12/12]** | ~2 min | Nettoyage, permissions finales, messages de statut |
 
-### 🔐 Sécurité du script
+###  Sécurité du script
 
 - **fail2ban** : Protection contre brute-force SSH activée
 - **ufw** : Pare-feu applicatif configuré (aligné sur NSG Azure)
@@ -966,7 +956,7 @@ Récapitulatif des règles NSG définies dans `network.tf` :
 - **Docker** : groupe `docker` ajouté à `devopsadmin` (accès sans sudo)
 - **Mots de passe par défaut** : Grafana (admin/admin), Vault (root token), tous changeable
 
-### 📝 Exemple de trace d'exécution
+###  Exemple de trace d'exécution
 
 ```log
 ==============================================================
@@ -988,7 +978,7 @@ Récapitulatif des règles NSG définies dans `network.tf` :
    ... (suite)
 ```
 
-### 🔧 Personnalisation du script
+###  Personnalisation du script
 
 Pour ajouter des outils supplémentaires, éditez `cloud-init/install.sh` :
 
@@ -1004,7 +994,7 @@ mkdir -p /data/my-workspace
 chown -R "$ADMIN_USER:$ADMIN_USER" /data/my-workspace
 ```
 
-> ⚠️ **Important** : testez le script localement avant de l'utiliser sur une VM de production :
+>  **Important** : testez le script localement avant de l'utiliser sur une VM de production :
 > ```bash
 > bash -x cloud-init/install.sh  # -x = debug mode
 > ```
