@@ -23,8 +23,15 @@ ok()  { echo "   $1"; }
 err() { echo "    $1 (non bloquant)"; }
 
 # pip silencieux — jamais bloquant
+# Compatible avec toutes les versions de pip : --root-user-action n'existe
+# que depuis pip 22.1, donc on vérifie sa disponibilité avant de l'utiliser
+# (la version fournie par apt sur Ubuntu 22.04 peut être plus ancienne).
 pip_install() {
-  pip3 install --quiet --root-user-action=ignore "$@" 2>/dev/null || err "pip_install échoué: $*"
+  if pip3 install --help 2>/dev/null | grep -q -- '--root-user-action'; then
+    pip3 install --quiet --root-user-action=ignore "$@" 2>/dev/null || err "pip_install échoué: $*"
+  else
+    pip3 install --quiet "$@" 2>/dev/null || err "pip_install échoué: $*"
+  fi
 }
 
 # ==============================================================
@@ -54,6 +61,13 @@ apt-get install -y -qq \
   libssl-dev libffi-dev \
   fail2ban ufw \
   zsh fzf bat fd-find ripgrep || err "Certains paquets apt ont échoué"
+
+# Upgrade pip immédiatement après installation système — la version apt
+# d'Ubuntu 22.04 est souvent trop ancienne pour supporter --root-user-action,
+# ce qui ferait échouer tous les appels pip_install plus bas (Ansible, stack
+# Python DataOps, etc.) avec l'erreur "no such option: --root-user-action".
+python3 -m pip install --upgrade pip --quiet 2>/dev/null || err "Upgrade pip échoué"
+ok "pip mis à jour : $(python3 -m pip --version 2>/dev/null || echo inconnue)"
 
 # eza (remplaçant maintenu de exa, absent des dépôts Ubuntu 22.04)
 wget -qO /tmp/eza.tar.gz \
@@ -479,7 +493,7 @@ ok "[7/12] Prometheus (9090) + Grafana (3000) + Node Exporter (9100) installés"
 # ==============================================================
 echo "[8/12] Stack DataOps / Data Science Python..."
 
-python3 -m pip install --quiet --root-user-action=ignore --upgrade pip setuptools wheel
+python3 -m pip install --quiet --upgrade pip setuptools wheel 2>/dev/null || true
 
 # Fix blinker — conflit entre version système et pip
 apt-get remove -y python3-blinker 2>/dev/null || true
@@ -522,10 +536,17 @@ pip_install fastapi "uvicorn[standard]" requests httpx aiohttp \
 # Airflow — les contraintes sont OBLIGATOIRES pour éviter les conflits
 PYTHON_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
 AIRFLOW_VER="2.9.1"
-pip3 install --quiet --root-user-action=ignore \
-  "apache-airflow==${AIRFLOW_VER}" \
-  --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VER}/constraints-${PYTHON_VER}.txt" \
-  && ok "Airflow ${AIRFLOW_VER} installé" || err "Airflow non installé"
+if pip3 install --help 2>/dev/null | grep -q -- '--root-user-action'; then
+  pip3 install --quiet --root-user-action=ignore \
+    "apache-airflow==${AIRFLOW_VER}" \
+    --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VER}/constraints-${PYTHON_VER}.txt" \
+    && ok "Airflow ${AIRFLOW_VER} installé" || err "Airflow non installé"
+else
+  pip3 install --quiet \
+    "apache-airflow==${AIRFLOW_VER}" \
+    --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VER}/constraints-${PYTHON_VER}.txt" \
+    && ok "Airflow ${AIRFLOW_VER} installé" || err "Airflow non installé"
+fi
 
 # Init Airflow et services systemd
 if command -v airflow &>/dev/null; then
