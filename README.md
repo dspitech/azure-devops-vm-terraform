@@ -667,9 +667,9 @@ Lancer le cloud Shell depuis le portal Azure et choisir PowerSehll.
 ### 2. Cloner et configurer
 
 ```bash
+git clone https://github.com/dspitech/azure-devops-vm-terraform.git
 cd azure-devops-vm
-cp terraform.tfvars.example terraform.tfvars   # si un exemple est fourni
-nano terraform.tfvars                          # Éditez selon vos besoins
+nano terraform.tfvars                          # Éditez selon vos besoins (optionnel)
 ```
 
 ### 3. Déployer
@@ -692,16 +692,12 @@ terraform output ssh_command
 **Étape 1 - Télécharger la clé privée** depuis le Cloud Shell Azure :
 
 ```
-azure-devops-vm-terraform/keys/devops-pro-vm_id_rsa
+download ./keys/devops-pro-vm_id_rsa  
 ```
 
 **Étape 2 - Se connecter depuis votre machine locale** (adapter le chemin vers la clé) :
 
 ```bash
-# Linux / macOS
-chmod 600 ~/Downloads/devops-pro-vm_id_rsa
-ssh -i ~/Downloads/devops-pro-vm_id_rsa devopsadmin@<IP>
-
 # Windows (PowerShell)
 ssh -i "C:\Users\<votre-utilisateur>\Downloads\devops-pro-vm_id_rsa" devopsadmin@<IP>
 ```
@@ -924,7 +920,7 @@ Récapitulatif des règles NSG définies dans `network.tf` :
 
 ---
 
-## Script Cloud-Init — Installation automatique
+## Script Cloud-Init - Installation automatique
 
 **Fichier** : `cloud-init/install.sh`
 
