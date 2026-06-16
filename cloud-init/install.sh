@@ -23,9 +23,6 @@ ok()  { echo "   $1"; }
 err() { echo "    $1 (non bloquant)"; }
 
 # pip silencieux — jamais bloquant
-# Compatible avec toutes les versions de pip : --root-user-action n'existe
-# que depuis pip 22.1, donc on vérifie sa disponibilité avant de l'utiliser
-# (la version fournie par apt sur Ubuntu 22.04 peut être plus ancienne).
 pip_install() {
   if pip3 install --help 2>/dev/null | grep -q -- '--root-user-action'; then
     pip3 install --quiet --root-user-action=ignore "$@" 2>/dev/null || err "pip_install échoué: $*"
@@ -62,21 +59,18 @@ apt-get install -y -qq \
   fail2ban ufw \
   zsh fzf bat fd-find ripgrep || err "Certains paquets apt ont échoué"
 
-# Upgrade pip immédiatement après installation système — la version apt
-# d'Ubuntu 22.04 est souvent trop ancienne pour supporter --root-user-action,
-# ce qui ferait échouer tous les appels pip_install plus bas (Ansible, stack
-# Python DataOps, etc.) avec l'erreur "no such option: --root-user-action".
+# Upgrade pip immédiatement après installation système
 python3 -m pip install --upgrade pip --quiet 2>/dev/null || err "Upgrade pip échoué"
 ok "pip mis à jour : $(python3 -m pip --version 2>/dev/null || echo inconnue)"
 
-# eza (remplaçant maintenu de exa, absent des dépôts Ubuntu 22.04)
+# eza
 wget -qO /tmp/eza.tar.gz \
   "https://github.com/eza-community/eza/releases/latest/download/eza_x86_64-unknown-linux-gnu.tar.gz" \
   && tar xzf /tmp/eza.tar.gz -C /usr/local/bin eza \
   && rm /tmp/eza.tar.gz \
   && ok "eza installé" || err "eza non installé"
 
-# yq — binaire GitHub (absent de apt Ubuntu 22.04)
+# yq
 wget -qO /usr/local/bin/yq \
   https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 \
   && chmod +x /usr/local/bin/yq \
@@ -89,7 +83,6 @@ ok "[0/12] Système mis à jour"
 # ==============================================================
 echo "[1/12] Configuration du disque de données..."
 
-# Attendre que le disque soit disponible (Azure peut mettre quelques secondes)
 for i in $(seq 1 6); do
   [ -b "$DATA_DISK" ] && break
   echo "  Attente du disque $DATA_DISK... ($i/6)"
@@ -111,7 +104,6 @@ else
   mkdir -p "$DATA_MOUNT"
 fi
 
-# Créer toute l'arborescence AVANT les conteneurs et le chown final
 mkdir -p "$DATA_MOUNT"/{projects,datasets,backups,docker-volumes}
 mkdir -p "$DATA_MOUNT/docker-volumes"/{postgres,mysql,redis,mongo}
 mkdir -p "$DATA_MOUNT/pentest"/{recon,exploits,reports,loot}
@@ -203,7 +195,26 @@ apt-get update -qq
 apt-get install -y docker-ce docker-ce-cli containerd.io \
   docker-buildx-plugin docker-compose-plugin
 
+# ── FIX DOCKER PERMISSIONS ──────────────────────────────────
+# usermod ajoute l'utilisateur au groupe docker, mais cloud-init tourne
+# en root et la session de $ADMIN_USER n'est pas encore ouverte.
+# On force le groupe dès maintenant via newgrp et on crée un script
+# d'activation automatique au premier login pour les sessions SSH.
 usermod -aG docker "$ADMIN_USER"
+
+# Activer le groupe dans toutes les sessions futures sans reconnexion
+# en injectant un `newgrp docker` transparent dans le profil non-login.
+cat >> "$HOME_DIR/.profile" << 'PROFILE_DOCKER'
+
+# Activer le groupe docker sans reconnexion (cloud-init fix)
+if ! id -Gn 2>/dev/null | grep -qw docker; then
+  exec sg docker "$SHELL $@"
+fi
+PROFILE_DOCKER
+
+# S'assurer que le socket est accessible par le groupe docker
+chmod 660 /var/run/docker.sock 2>/dev/null || true
+chgrp docker /var/run/docker.sock 2>/dev/null || true
 
 mkdir -p /etc/docker
 cat > /etc/docker/daemon.json << 'EOF'
@@ -379,7 +390,6 @@ systemctl enable vault
 systemctl start vault
 sleep 3
 
-# Init automatique — root token sauvegardé dans /root/.vault-init
 if [ ! -f /root/.vault-init ]; then
   export VAULT_ADDR="http://127.0.0.1:8200"
   vault operator init -key-shares=1 -key-threshold=1 -format=json > /root/.vault-init 2>/dev/null || true
@@ -495,8 +505,10 @@ echo "[8/12] Stack DataOps / Data Science Python..."
 
 python3 -m pip install --quiet --upgrade pip setuptools wheel 2>/dev/null || true
 
-# Fix blinker — conflit entre version système et pip
-apt-get remove -y python3-blinker 2>/dev/null || true
+# ── FIX BLINKER ─────────────────────────────────────────────
+# NE PAS faire `apt-get remove python3-blinker` : cela supprime en cascade
+# walinuxagent, cloud-init et d'autres packages critiques Azure.
+# --ignore-installed suffit à faire cohabiter la version pip avec le système.
 pip_install --ignore-installed blinker
 
 # Jupyter
@@ -548,7 +560,6 @@ else
     && ok "Airflow ${AIRFLOW_VER} installé" || err "Airflow non installé"
 fi
 
-# Init Airflow et services systemd
 if command -v airflow &>/dev/null; then
   sudo -u "$ADMIN_USER" bash -c "
     export AIRFLOW_HOME=$HOME_DIR/airflow
@@ -592,7 +603,7 @@ WantedBy=multi-user.target
 EOF
 
   systemctl enable airflow-webserver airflow-scheduler
-  ok "Airflow services activés (port 8080 — démarrage : sudo systemctl start airflow-webserver)"
+  ok "Airflow services activés (port 8080)"
 fi
 
 # PySpark + Dask
@@ -613,7 +624,6 @@ c.ServerApp.allow_remote_access = True
 EOF
 chown -R "$ADMIN_USER:$ADMIN_USER" "$HOME_DIR/.jupyter"
 
-# Résoudre le chemin de jupyter pour le service
 JUPYTER_BIN=$(su -c "which jupyter" - "$ADMIN_USER" 2>/dev/null \
   || find /usr /home -name jupyter -type f 2>/dev/null | head -1 \
   || echo "/usr/local/bin/jupyter")
@@ -647,7 +657,6 @@ echo "[9/12] Outils base de données..."
 apt-get install -y postgresql-client mysql-client redis-tools sqlite3 \
   && ok "Clients DB installés" || err "Certains clients DB non installés"
 
-# Les conteneurs écoutent sur 127.0.0.1 uniquement — aligné sur le NSG (BDD = VNet interne)
 docker run -d \
   --name postgres \
   --restart always \
@@ -684,7 +693,6 @@ docker run -d \
 wait
 ok "Conteneurs DB démarrés sur loopback (postgres:5432, mysql:3306, redis:6379, mongo:27017)"
 
-# usql — client universel multi-BDD
 USQL_VER=$(curl -s "https://api.github.com/repos/xo/usql/releases/latest" \
   | jq -r .tag_name | tr -d v)
 curl -sLO "https://github.com/xo/usql/releases/download/v${USQL_VER}/usql_static-${USQL_VER}-linux-amd64.tar.bz2" \
@@ -726,11 +734,9 @@ ufw allow 3000/tcp comment 'Grafana (allowed_ssh_cidr via NSG)'
 ufw allow 9090/tcp comment 'Prometheus (allowed_ssh_cidr via NSG)'
 ufw allow 9443/tcp comment 'Portainer (allowed_ssh_cidr via NSG)'
 ufw allow 8200/tcp comment 'Vault (allowed_ssh_cidr via NSG)'
-# 9100 / BDD : filtrés par NSG (VNet interne), pas besoin d'ouvrir dans UFW
 ufw --force enable
 ok "UFW configuré (règles alignées sur network.tf NSG)"
 
-# ── fail2ban — config SSH durcie ────────────────────────────
 cat > /etc/fail2ban/jail.local << 'EOF'
 [DEFAULT]
 bantime  = 1h
@@ -766,7 +772,6 @@ apt-get install -y \
   nbtscan \
   && ok "Outils pentest apt installés" || err "Certains outils pentest apt non installés"
 
-# Nuclei
 NUCLEI_VER=$(curl -s "https://api.github.com/repos/projectdiscovery/nuclei/releases/latest" | jq -r .tag_name)
 curl -sLO "https://github.com/projectdiscovery/nuclei/releases/download/$NUCLEI_VER/nuclei_${NUCLEI_VER#v}_linux_amd64.zip"
 unzip -oq nuclei_*.zip nuclei
@@ -775,7 +780,6 @@ rm -f nuclei nuclei_*.zip
 sudo -u "$ADMIN_USER" /usr/local/bin/nuclei -update-templates 2>/dev/null || true
 ok "Nuclei $NUCLEI_VER installé (templates mis à jour)"
 
-# ffuf
 FFUF_VER=$(curl -s "https://api.github.com/repos/ffuf/ffuf/releases/latest" | jq -r .tag_name)
 curl -sLO "https://github.com/ffuf/ffuf/releases/download/$FFUF_VER/ffuf_${FFUF_VER#v}_linux_amd64.tar.gz"
 tar xzf ffuf_*.tar.gz ffuf
@@ -783,7 +787,6 @@ install ffuf /usr/local/bin/
 rm -f ffuf ffuf_*.tar.gz
 ok "ffuf $FFUF_VER installé"
 
-# gobuster
 GOBB_VER=$(curl -s "https://api.github.com/repos/OJ/gobuster/releases/latest" | jq -r .tag_name)
 curl -sLO "https://github.com/OJ/gobuster/releases/download/$GOBB_VER/gobuster_Linux_x86_64.tar.gz"
 tar xzf gobuster_Linux_x86_64.tar.gz gobuster
@@ -791,7 +794,6 @@ install gobuster /usr/local/bin/
 rm -f gobuster gobuster_*.tar.gz
 ok "gobuster $GOBB_VER installé"
 
-# Amass
 AMASS_VER=$(curl -s "https://api.github.com/repos/owasp-amass/amass/releases/latest" | jq -r .tag_name)
 curl -sLO "https://github.com/owasp-amass/amass/releases/download/$AMASS_VER/amass_Linux_amd64.zip"
 unzip -oq amass_Linux_amd64.zip
@@ -799,16 +801,13 @@ install amass_Linux_amd64/amass /usr/local/bin/
 rm -rf amass_Linux_amd64*
 ok "Amass $AMASS_VER installé"
 
-# theHarvester
 pip_install theHarvester && ok "theHarvester installé" || err "theHarvester non installé"
 
-# testssl.sh
 git clone --depth=1 https://github.com/drwetter/testssl.sh /opt/testssl 2>/dev/null \
   || git -C /opt/testssl pull 2>/dev/null || true
 ln -sf /opt/testssl/testssl.sh /usr/local/bin/testssl
 ok "testssl.sh installé"
 
-# Metasploit Framework
 curl -fsSL https://apt.metasploit.com/metasploit-framework.gpg \
   | gpg --dearmor -o /usr/share/keyrings/metasploit.gpg 2>/dev/null || true
 echo "deb [signed-by=/usr/share/keyrings/metasploit.gpg] https://apt.metasploit.com/ $(lsb_release -cs) main" \
@@ -818,11 +817,9 @@ apt-get install -y metasploit-framework \
   && ok "Metasploit installé" \
   || err "Metasploit non installé (repo peut ne pas supporter jammy)"
 
-# SecLists
 git clone --depth=1 https://github.com/danielmiessler/SecLists /opt/SecLists 2>/dev/null \
   && ok "SecLists installé dans /opt/SecLists" || err "SecLists non installé"
 
-# Wordlists
 apt-get install -y wordlists 2>/dev/null || true
 gunzip /usr/share/wordlists/rockyou.txt.gz 2>/dev/null || true
 ok "Wordlists configurées (/usr/share/wordlists/rockyou.txt)"
@@ -834,7 +831,6 @@ ok "[10b/12] Outils Pentest installés"
 # ==============================================================
 echo "[11/12] Langages de programmation..."
 
-# Go
 GO_VER=$(curl -s "https://go.dev/dl/?mode=json" | jq -r '.[0].version')
 curl -sLO "https://go.dev/dl/${GO_VER}.linux-amd64.tar.gz"
 rm -rf /usr/local/go
@@ -848,18 +844,15 @@ chmod +x /etc/profile.d/go.sh
 export PATH=$PATH:/usr/local/go/bin
 ok "Go $GO_VER installé"
 
-# Node.js LTS
 curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
 apt-get install -y nodejs
 npm install -g yarn pnpm typescript ts-node eslint prettier pm2 \
   && ok "Node.js $(node --version) + npm globals installés" || err "npm globals non installés"
 
-# Rust
 sudo -u "$ADMIN_USER" bash -c \
   'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path 2>/dev/null' \
   && ok "Rust installé" || err "Rust non installé"
 
-# Java 21 + Maven
 apt-get install -y openjdk-21-jdk maven \
   && ok "Java 21 + Maven installés" || err "Java non installé"
 
@@ -869,7 +862,6 @@ export PATH="$JAVA_HOME/bin:$PATH"
 EOF
 chmod +x /etc/profile.d/java.sh
 
-# Gradle
 GRADLE_VER="8.7"
 curl -sLO "https://services.gradle.org/distributions/gradle-${GRADLE_VER}-bin.zip"
 unzip -oq "gradle-${GRADLE_VER}-bin.zip" -d /opt/
@@ -877,7 +869,6 @@ ln -sf "/opt/gradle-${GRADLE_VER}/bin/gradle" /usr/local/bin/gradle
 rm -f "gradle-${GRADLE_VER}-bin.zip"
 ok "Gradle $GRADLE_VER installé"
 
-# SDKMAN
 sudo -u "$ADMIN_USER" bash -c 'curl -s "https://get.sdkman.io" | bash' \
   && ok "SDKMAN installé" || err "SDKMAN non installé"
 
@@ -888,13 +879,11 @@ ok "[11/12] Go / Node.js / Rust / Java installés"
 # ==============================================================
 echo "[12/12] Configuration finale..."
 
-# Git
 sudo -u "$ADMIN_USER" git config --global init.defaultBranch main
 sudo -u "$ADMIN_USER" git config --global pull.rebase false
 sudo -u "$ADMIN_USER" git config --global core.editor vim
 ok "Git configuré"
 
-# Vim
 cat > /etc/vim/vimrc.local << 'VIMRC'
 syntax on
 set number relativenumber
@@ -910,7 +899,6 @@ colorscheme desert
 VIMRC
 ok "Vim configuré"
 
-# MOTD
 cat > /etc/motd << 'MOTD'
 
   ╔══════════════════════════════════════════════════════════╗
@@ -945,7 +933,6 @@ cat > /etc/motd << 'MOTD'
 
 MOTD
 
-# devops-status
 cat > /usr/local/bin/devops-status << 'STATUS'
 #!/bin/bash
 echo ""
@@ -987,11 +974,9 @@ echo ""
 STATUS
 chmod +x /usr/local/bin/devops-status
 
-# Reload systemd et démarrage final des services
 systemctl daemon-reload
 systemctl start jupyter 2>/dev/null && ok "JupyterLab démarré sur :8888" || err "JupyterLab non démarré (vérifier : journalctl -u jupyter)"
 
-# Droits finaux sur le home et le disque
 chown -R "$ADMIN_USER:$ADMIN_USER" "$HOME_DIR"
 chown -R "$ADMIN_USER:$ADMIN_USER" "$DATA_MOUNT" 2>/dev/null || true
 
