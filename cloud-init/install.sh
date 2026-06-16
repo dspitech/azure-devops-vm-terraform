@@ -526,8 +526,8 @@ pip_install \
   scikit-learn xgboost \
   && ok "Data science libs installées" || err "Data science libs non installées"
 
-# Bases de données Python (sans pymysql — MySQL supprimé)
-pip_install sqlalchemy psycopg2-binary pymongo redis \
+# Bases de données Python
+pip_install sqlalchemy psycopg2-binary redis \
   && ok "DB libs installées" || err "DB libs non installées"
 
 # dbt + mlflow
@@ -597,7 +597,7 @@ ok "[8/12] Python DataOps stack installé"
 # ==============================================================
 echo "[9/12] Outils base de données..."
 
-# Clients DB uniquement (MySQL, MongoDB et Airflow supprimés)
+# Clients DB (MySQL, MongoDB et Airflow supprimés)
 apt-get install -y postgresql-client redis-tools sqlite3 \
   && ok "Clients DB installés (pg, redis, sqlite)" || err "Certains clients DB non installés"
 
@@ -609,16 +609,15 @@ docker run -d \
   -e POSTGRES_PASSWORD=postgres \
   -e POSTGRES_USER=postgres \
   -v "$DATA_MOUNT/docker-volumes/postgres":/var/lib/postgresql/data \
-  postgres:16-alpine &
+  postgres:16-alpine
 
 docker run -d \
   --name redis \
   --restart always \
   -p 127.0.0.1:6379:6379 \
   -v "$DATA_MOUNT/docker-volumes/redis":/data \
-  redis:7-alpine --appendonly yes &
+  redis:7-alpine --appendonly yes
 
-wait
 ok "Conteneurs DB démarrés sur loopback (postgres:5432, redis:6379)"
 
 USQL_VER=$(curl -s "https://api.github.com/repos/xo/usql/releases/latest" \
