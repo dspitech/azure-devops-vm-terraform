@@ -59,9 +59,13 @@ apt-get install -y -qq \
   fail2ban ufw \
   zsh fzf bat fd-find ripgrep || err "Certains paquets apt ont échoué"
 
-# Upgrade pip immédiatement après installation système
+# Upgrade pip + typing_extensions immédiatement après installation système
+# FIX : pydantic-core / Airflow crashent si typing_extensions < 4.13
 python3 -m pip install --upgrade pip --quiet 2>/dev/null || err "Upgrade pip échoué"
+pip3 install --quiet --root-user-action=ignore "typing_extensions>=4.13.2" 2>/dev/null \
+  || err "Upgrade typing_extensions échoué"
 ok "pip mis à jour : $(python3 -m pip --version 2>/dev/null || echo inconnue)"
+ok "typing_extensions : $(python3 -c 'import typing_extensions; print(typing_extensions.__version__)' 2>/dev/null || echo inconnue)"
 
 # eza
 wget -qO /tmp/eza.tar.gz \
@@ -105,7 +109,7 @@ else
 fi
 
 mkdir -p "$DATA_MOUNT"/{projects,datasets,backups,docker-volumes}
-mkdir -p "$DATA_MOUNT/docker-volumes"/{postgres,mysql,redis,mongo}
+mkdir -p "$DATA_MOUNT/docker-volumes"/{postgres,redis,mongo}
 mkdir -p "$DATA_MOUNT/pentest"/{recon,exploits,reports,loot}
 chown -R "$ADMIN_USER:$ADMIN_USER" "$DATA_MOUNT"
 
@@ -196,14 +200,17 @@ apt-get install -y docker-ce docker-ce-cli containerd.io \
   docker-buildx-plugin docker-compose-plugin
 
 # ── FIX DOCKER PERMISSIONS ──────────────────────────────────
-# usermod ajoute l'utilisateur au groupe docker, mais cloud-init tourne
-# en root et la session de $ADMIN_USER n'est pas encore ouverte.
-# On force le groupe dès maintenant via newgrp et on crée un script
-# d'activation automatique au premier login pour les sessions SSH.
-usermod -aG docker "$ADMIN_USER"
+# usermod -aG fonctionne uniquement si l'utilisateur existe déjà.
+# cloud-init tourne en root ; on vérifie explicitement que $ADMIN_USER
+# existe avant d'appeler usermod pour éviter "user '' does not exist".
+if id "$ADMIN_USER" &>/dev/null; then
+  usermod -aG docker "$ADMIN_USER"
+  ok "Utilisateur $ADMIN_USER ajouté au groupe docker"
+else
+  err "Utilisateur $ADMIN_USER non trouvé — usermod ignoré"
+fi
 
-# Activer le groupe dans toutes les sessions futures sans reconnexion
-# en injectant un `newgrp docker` transparent dans le profil non-login.
+# Activer le groupe docker dans les sessions futures sans reconnexion
 cat >> "$HOME_DIR/.profile" << 'PROFILE_DOCKER'
 
 # Activer le groupe docker sans reconnexion (cloud-init fix)
@@ -233,7 +240,7 @@ systemctl start docker
 # Attendre que le socket Docker soit prêt
 timeout 30 bash -c 'until docker info &>/dev/null; do sleep 2; done'
 
-# Portainer
+# ── Seul Portainer est démarré comme conteneur au boot ──────
 docker volume create portainer_data || true
 docker run -d \
   --name portainer \
@@ -505,10 +512,15 @@ echo "[8/12] Stack DataOps / Data Science Python..."
 
 python3 -m pip install --quiet --upgrade pip setuptools wheel 2>/dev/null || true
 
+# ── FIX TYPING_EXTENSIONS ───────────────────────────────────
+# pydantic-core >= 2.x et Airflow 2.9 nécessitent typing_extensions >= 4.13.2
+# qui expose `Sentinel`. On l'installe en premier, avant tout autre paquet.
+pip3 install --quiet --root-user-action=ignore "typing_extensions>=4.13.2" 2>/dev/null \
+  || err "Upgrade typing_extensions échoué"
+
 # ── FIX BLINKER ─────────────────────────────────────────────
 # NE PAS faire `apt-get remove python3-blinker` : cela supprime en cascade
 # walinuxagent, cloud-init et d'autres packages critiques Azure.
-# --ignore-installed suffit à faire cohabiter la version pip avec le système.
 pip_install --ignore-installed blinker
 
 # Jupyter
@@ -522,8 +534,8 @@ pip_install \
   scikit-learn xgboost \
   && ok "Data science libs installées" || err "Data science libs non installées"
 
-# Bases de données Python
-pip_install sqlalchemy psycopg2-binary pymysql pymongo redis \
+# Bases de données Python (sans pymysql — MySQL supprimé)
+pip_install sqlalchemy psycopg2-binary pymongo redis \
   && ok "DB libs installées" || err "DB libs non installées"
 
 # dbt + mlflow
@@ -654,9 +666,11 @@ ok "[8/12] Python DataOps stack installé"
 # ==============================================================
 echo "[9/12] Outils base de données..."
 
-apt-get install -y postgresql-client mysql-client redis-tools sqlite3 \
-  && ok "Clients DB installés" || err "Certains clients DB non installés"
+# MySQL supprimé — on n'installe que les clients restants
+apt-get install -y postgresql-client redis-tools sqlite3 \
+  && ok "Clients DB installés (pg, redis, sqlite)" || err "Certains clients DB non installés"
 
+# Conteneurs DB : postgres, redis, mongo uniquement (MySQL supprimé)
 docker run -d \
   --name postgres \
   --restart always \
@@ -665,14 +679,6 @@ docker run -d \
   -e POSTGRES_USER=postgres \
   -v "$DATA_MOUNT/docker-volumes/postgres":/var/lib/postgresql/data \
   postgres:16-alpine &
-
-docker run -d \
-  --name mysql \
-  --restart always \
-  -p 127.0.0.1:3306:3306 \
-  -e MYSQL_ROOT_PASSWORD=root \
-  -v "$DATA_MOUNT/docker-volumes/mysql":/var/lib/mysql \
-  mysql:8 &
 
 docker run -d \
   --name redis \
@@ -691,7 +697,7 @@ docker run -d \
   mongo:7 &
 
 wait
-ok "Conteneurs DB démarrés sur loopback (postgres:5432, mysql:3306, redis:6379, mongo:27017)"
+ok "Conteneurs DB démarrés sur loopback (postgres:5432, redis:6379, mongo:27017)"
 
 USQL_VER=$(curl -s "https://api.github.com/repos/xo/usql/releases/latest" \
   | jq -r .tag_name | tr -d v)
@@ -916,7 +922,6 @@ cat > /etc/motd << 'MOTD'
   ║  🐋 Portainer     : https://<IP>:9443                   ║
   ╠══════════════════════════════════════════════════════════╣
   ║  🐘 PostgreSQL    : localhost:5432    (postgres/postgres)║
-  ║  🐬 MySQL         : localhost:3306    (root/root)        ║
   ║  🔴 Redis         : localhost:6379                       ║
   ║  🍃 MongoDB       : localhost:27017   (admin/admin)      ║
   ╠══════════════════════════════════════════════════════════╣
