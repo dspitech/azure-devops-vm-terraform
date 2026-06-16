@@ -60,7 +60,6 @@ apt-get install -y -qq \
   zsh fzf bat fd-find ripgrep || err "Certains paquets apt ont échoué"
 
 # Upgrade pip + typing_extensions immédiatement après installation système
-# FIX : pydantic-core / Airflow crashent si typing_extensions < 4.13
 python3 -m pip install --upgrade pip --quiet 2>/dev/null || err "Upgrade pip échoué"
 pip3 install --quiet --root-user-action=ignore "typing_extensions>=4.13.2" 2>/dev/null \
   || err "Upgrade typing_extensions échoué"
@@ -109,7 +108,7 @@ else
 fi
 
 mkdir -p "$DATA_MOUNT"/{projects,datasets,backups,docker-volumes}
-mkdir -p "$DATA_MOUNT/docker-volumes"/{postgres,redis,mongo}
+mkdir -p "$DATA_MOUNT/docker-volumes"/{postgres,redis}
 mkdir -p "$DATA_MOUNT/pentest"/{recon,exploits,reports,loot}
 chown -R "$ADMIN_USER:$ADMIN_USER" "$DATA_MOUNT"
 
@@ -200,9 +199,6 @@ apt-get install -y docker-ce docker-ce-cli containerd.io \
   docker-buildx-plugin docker-compose-plugin
 
 # ── FIX DOCKER PERMISSIONS ──────────────────────────────────
-# usermod -aG fonctionne uniquement si l'utilisateur existe déjà.
-# cloud-init tourne en root ; on vérifie explicitement que $ADMIN_USER
-# existe avant d'appeler usermod pour éviter "user '' does not exist".
 if id "$ADMIN_USER" &>/dev/null; then
   usermod -aG docker "$ADMIN_USER"
   ok "Utilisateur $ADMIN_USER ajouté au groupe docker"
@@ -513,14 +509,10 @@ echo "[8/12] Stack DataOps / Data Science Python..."
 python3 -m pip install --quiet --upgrade pip setuptools wheel 2>/dev/null || true
 
 # ── FIX TYPING_EXTENSIONS ───────────────────────────────────
-# pydantic-core >= 2.x et Airflow 2.9 nécessitent typing_extensions >= 4.13.2
-# qui expose `Sentinel`. On l'installe en premier, avant tout autre paquet.
 pip3 install --quiet --root-user-action=ignore "typing_extensions>=4.13.2" 2>/dev/null \
   || err "Upgrade typing_extensions échoué"
 
 # ── FIX BLINKER ─────────────────────────────────────────────
-# NE PAS faire `apt-get remove python3-blinker` : cela supprime en cascade
-# walinuxagent, cloud-init et d'autres packages critiques Azure.
 pip_install --ignore-installed blinker
 
 # Jupyter
@@ -556,67 +548,6 @@ pip_install \
 # API
 pip_install fastapi "uvicorn[standard]" requests httpx aiohttp \
   && ok "API libs installées" || err "API libs non installées"
-
-# Airflow — les contraintes sont OBLIGATOIRES pour éviter les conflits
-PYTHON_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-AIRFLOW_VER="2.9.1"
-if pip3 install --help 2>/dev/null | grep -q -- '--root-user-action'; then
-  pip3 install --quiet --root-user-action=ignore \
-    "apache-airflow==${AIRFLOW_VER}" \
-    --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VER}/constraints-${PYTHON_VER}.txt" \
-    && ok "Airflow ${AIRFLOW_VER} installé" || err "Airflow non installé"
-else
-  pip3 install --quiet \
-    "apache-airflow==${AIRFLOW_VER}" \
-    --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VER}/constraints-${PYTHON_VER}.txt" \
-    && ok "Airflow ${AIRFLOW_VER} installé" || err "Airflow non installé"
-fi
-
-if command -v airflow &>/dev/null; then
-  sudo -u "$ADMIN_USER" bash -c "
-    export AIRFLOW_HOME=$HOME_DIR/airflow
-    airflow db migrate 2>/dev/null || airflow db init
-    airflow users create \
-      --username admin --password admin \
-      --firstname Admin --lastname User \
-      --role Admin --email admin@localhost 2>/dev/null || true
-  " || err "Airflow DB init échoué"
-
-  cat > /etc/systemd/system/airflow-webserver.service << EOF
-[Unit]
-Description=Apache Airflow Webserver
-After=network.target
-
-[Service]
-User=$ADMIN_USER
-Environment=AIRFLOW_HOME=$HOME_DIR/airflow
-ExecStart=$(which airflow) webserver --port 8080
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-  cat > /etc/systemd/system/airflow-scheduler.service << EOF
-[Unit]
-Description=Apache Airflow Scheduler
-After=network.target
-
-[Service]
-User=$ADMIN_USER
-Environment=AIRFLOW_HOME=$HOME_DIR/airflow
-ExecStart=$(which airflow) scheduler
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-  systemctl enable airflow-webserver airflow-scheduler
-  ok "Airflow services activés (port 8080)"
-fi
 
 # PySpark + Dask
 pip_install pyspark  && ok "PySpark installé" || err "PySpark non installé"
@@ -666,11 +597,11 @@ ok "[8/12] Python DataOps stack installé"
 # ==============================================================
 echo "[9/12] Outils base de données..."
 
-# MySQL supprimé — on n'installe que les clients restants
+# Clients DB uniquement (MySQL, MongoDB et Airflow supprimés)
 apt-get install -y postgresql-client redis-tools sqlite3 \
   && ok "Clients DB installés (pg, redis, sqlite)" || err "Certains clients DB non installés"
 
-# Conteneurs DB : postgres, redis, mongo uniquement (MySQL supprimé)
+# Conteneurs DB : postgres, redis uniquement (MongoDB supprimé)
 docker run -d \
   --name postgres \
   --restart always \
@@ -687,17 +618,8 @@ docker run -d \
   -v "$DATA_MOUNT/docker-volumes/redis":/data \
   redis:7-alpine --appendonly yes &
 
-docker run -d \
-  --name mongo \
-  --restart always \
-  -p 127.0.0.1:27017:27017 \
-  -e MONGO_INITDB_ROOT_USERNAME=admin \
-  -e MONGO_INITDB_ROOT_PASSWORD=admin \
-  -v "$DATA_MOUNT/docker-volumes/mongo":/data/db \
-  mongo:7 &
-
 wait
-ok "Conteneurs DB démarrés sur loopback (postgres:5432, redis:6379, mongo:27017)"
+ok "Conteneurs DB démarrés sur loopback (postgres:5432, redis:6379)"
 
 USQL_VER=$(curl -s "https://api.github.com/repos/xo/usql/releases/latest" \
   | jq -r .tag_name | tr -d v)
@@ -728,20 +650,20 @@ curl -sLo /usr/local/bin/hadolint \
 chmod +x /usr/local/bin/hadolint
 ok "Hadolint $HADO_VER installé"
 
-# ── UFW — aligné exactement sur les règles NSG de network.tf ──
+# ── UFW ──────────────────────────────────────────────────────
 ufw --force reset
 ufw default deny incoming
 ufw default allow outgoing
-ufw allow 22/tcp   comment 'SSH (allowed_ssh_cidr via NSG)'
+ufw allow 22/tcp   comment 'SSH'
 ufw allow 80/tcp   comment 'HTTP public'
 ufw allow 443/tcp  comment 'HTTPS public'
-ufw allow 8888/tcp comment 'JupyterLab (allowed_ssh_cidr via NSG)'
-ufw allow 3000/tcp comment 'Grafana (allowed_ssh_cidr via NSG)'
-ufw allow 9090/tcp comment 'Prometheus (allowed_ssh_cidr via NSG)'
-ufw allow 9443/tcp comment 'Portainer (allowed_ssh_cidr via NSG)'
-ufw allow 8200/tcp comment 'Vault (allowed_ssh_cidr via NSG)'
+ufw allow 8888/tcp comment 'JupyterLab'
+ufw allow 3000/tcp comment 'Grafana'
+ufw allow 9090/tcp comment 'Prometheus'
+ufw allow 9443/tcp comment 'Portainer'
+ufw allow 8200/tcp comment 'Vault'
 ufw --force enable
-ok "UFW configuré (règles alignées sur network.tf NSG)"
+ok "UFW configuré"
 
 cat > /etc/fail2ban/jail.local << 'EOF'
 [DEFAULT]
@@ -923,7 +845,6 @@ cat > /etc/motd << 'MOTD'
   ╠══════════════════════════════════════════════════════════╣
   ║  🐘 PostgreSQL    : localhost:5432    (postgres/postgres)║
   ║  🔴 Redis         : localhost:6379                       ║
-  ║  🍃 MongoDB       : localhost:27017   (admin/admin)      ║
   ╠══════════════════════════════════════════════════════════╣
   ║  🔍 Pentest       : nuclei / ffuf / gobuster / sqlmap   ║
   ║  🌐 OSINT         : theHarvester / amass                ║
@@ -964,7 +885,7 @@ echo "── Containers Docker ────────────────�
 docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null
 echo ""
 echo "── Services systemd ────────────────────────────────"
-for svc in docker jupyter vault node_exporter fail2ban airflow-webserver airflow-scheduler; do
+for svc in docker jupyter vault node_exporter fail2ban; do
   STATUS_VAL=$(systemctl is-active "$svc" 2>/dev/null)
   [ "$STATUS_VAL" = "active" ] && ICON="✅" || ICON="⚪"
   printf "  %s %-24s %s\n" "$ICON" "$svc:" "$STATUS_VAL"
