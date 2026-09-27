@@ -14,53 +14,91 @@ cd azure-devops-vm-terraform
 
 3) Initialiser Terraform
 -------------------------------------------------------------
-terraform init
 terraform fmt
+terraform init
 terraform validate
 
 4) Déployer
 -------------------------------------------------------------
-# Option A - profil par défaut (fullstack, tout installé) :
+# Option A - profil défini dans terraform.tfvars (fullstack par défaut) :
 terraform plan
 terraform apply -auto-approve
 
-# Option B - profil ciblé (choisir un seul fichier) :
-terraform apply -auto-approve -var-file="examples/devops.tfvars"
-terraform apply -auto-approve -var-file="examples/dataops.tfvars"
-terraform apply -auto-approve -var-file="examples/cybersecurity.tfvars"
-terraform apply -auto-approve -var-file="examples/fullstack.tfvars"
+# Option B - profil ciblé, un seul à la fois (voir section 5 ci-dessous)
 
-5) Récupérer les infos de connexion
+5) Déploiement par profil (examples/*.tfvars)
+-------------------------------------------------------------
+# Chaque profil a son propre resource group / nom de VM : ils ne se
+# marchent pas dessus, mais consomment chacun du crédit Azure s'ils
+# tournent en même temps. Pensez à "destroy" un profil avant d'en tester
+# un autre si vous voulez limiter les coûts.
+#
+# L'IP autorisée (allowed_ssh_cidr) vient de votre terraform.tfvars si
+# vous l'avez déjà définie ; sinon elle est détectée automatiquement.
+
+# --- DevOps (Kubernetes, IaC, CI/CD) ---
+terraform apply -auto-approve -var-file="examples/devops.tfvars"
+terraform output dashboard_url
+terraform destroy -auto-approve -var-file="examples/devops.tfvars"
+
+# --- DataOps (JupyterLab, Python data science) ---
+terraform apply -auto-approve -var-file="examples/dataops.tfvars"
+terraform output dashboard_url
+terraform destroy -auto-approve -var-file="examples/dataops.tfvars"
+
+# --- Cybersécurité (réseau, pentest offensif) ---
+terraform apply -auto-approve -var-file="examples/cybersecurity.tfvars"
+terraform output dashboard_url
+terraform destroy -auto-approve -var-file="examples/cybersecurity.tfvars"
+
+# --- Fullstack (tout réuni) ---
+terraform apply -auto-approve -var-file="examples/fullstack.tfvars"
+terraform output dashboard_url
+terraform destroy -auto-approve -var-file="examples/fullstack.tfvars"
+
+# Vérifier quel profil est actif dans votre terraform.tfvars :
+grep vm_profile terraform.tfvars
+
+6) Récupérer les infos de connexion
 -------------------------------------------------------------
 terraform output ssh_command
+terraform output admin_username
 terraform output dashboard_url
 terraform output grafana_admin_password
 terraform output jupyter_token
 terraform output portainer_admin_password
 terraform output allowed_ssh_cidr_effective
 
-6) Se connecter en SSH
+# Ou en un seul coup :
+./get-credentials.sh          # Linux / macOS / Cloud Shell bash
+.\get-credentials.ps1         # PowerShell
+
+7) Se connecter en SSH
 -------------------------------------------------------------
 # Télécharger la clé privée générée (ex. depuis Azure Cloud Shell) :
-download ./keys/devops-pro-vm_id_rsa
+download ./keys/<vm_name>_id_rsa
 
 # Puis se connecter (adapter le chemin de la clé et l'IP) :
-ssh -i ./keys/devops-pro-vm_id_rsa devopsadmin@<IP_PUBLIQUE>
+ssh -i ./keys/<vm_name>_id_rsa devopsadmin@<IP_PUBLIQUE>
 
-7) Suivre l'installation et vérifier l'état
+8) Suivre l'installation et vérifier l'état
 -------------------------------------------------------------
 tail -f /var/log/devops-install.log
 devops-status
 
-8) Accéder au tableau de bord
+9) Accéder au tableau de bord
 -------------------------------------------------------------
 http://<IP_PUBLIQUE>/
 
-9) Éteindre / redémarrer la VM (économiser le crédit Azure)
+10) Éteindre / redémarrer la VM (économiser le crédit Azure)
 -------------------------------------------------------------
-az vm deallocate -g rg-devops-pro-vm -n devops-pro-vm
-az vm start -g rg-devops-pro-vm -n devops-pro-vm
+az vm deallocate -g <resource_group_name> -n <vm_name>
+az vm start -g <resource_group_name> -n <vm_name>
 
-10) Détruire l'infrastructure
+11) Détruire l'infrastructure
 -------------------------------------------------------------
+# Doit utiliser le MEME -var-file que celui utilisé au apply, sinon
+# Terraform peut se tromper sur ce qu'il doit supprimer :
 terraform destroy -auto-approve
+# ou, si déployé avec un profil :
+terraform destroy -auto-approve -var-file="examples/<profil>.tfvars"
