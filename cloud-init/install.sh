@@ -925,14 +925,13 @@ git clone --depth=1 https://github.com/drwetter/testssl.sh /opt/testssl 2>/dev/n
 ln -sf /opt/testssl/testssl.sh /usr/local/bin/testssl
 ok "testssl.sh installé"
 
-curl -fsSL https://apt.metasploit.com/metasploit-framework.gpg \
-  | gpg --dearmor -o /usr/share/keyrings/metasploit.gpg 2>/dev/null || true
-echo "deb [signed-by=/usr/share/keyrings/metasploit.gpg] https://apt.metasploit.com/ $(lsb_release -cs) main" \
-  > /etc/apt/sources.list.d/metasploit.list
-apt-get update -qq 2>/dev/null || true
-apt-get install -y metasploit-framework \
-  && ok "Metasploit installé" \
-  || err "Metasploit non installé (repo peut ne pas supporter jammy)"
+curl -fsSL https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb \
+  -o /tmp/msfinstall \
+  && chmod 755 /tmp/msfinstall \
+  && /tmp/msfinstall \
+  && ok "Metasploit installé (installeur officiel Rapid7)" \
+  || err "Metasploit non installé (installeur Rapid7 injoignable)"
+rm -f /tmp/msfinstall
 
 git clone --depth=1 https://github.com/danielmiessler/SecLists /opt/SecLists 2>/dev/null \
   && ok "SecLists installé dans /opt/SecLists" || err "SecLists non installé"
@@ -965,8 +964,28 @@ chmod +x /etc/profile.d/go.sh
 export PATH=$PATH:/usr/local/go/bin
 ok "Go $GO_VER installé"
 
-curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
+if curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - ; then
+  ok "Dépôt NodeSource configuré"
+else
+  err "Configuration du dépôt NodeSource échouée (réseau ?) — nouvelle tentative après un court délai"
+  sleep 5
+  curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - || err "NodeSource toujours indisponible — nodejs viendra des dépôts Ubuntu (version ancienne)"
+fi
 apt-get install -y nodejs
+
+# Vérifie que la version installée est bien une LTS récente (>=18) et pas
+# le paquet nodejs 12.x fourni par Ubuntu (installé si NodeSource a échoué
+# silencieusement plus haut).
+NODE_MAJOR=$(node --version 2>/dev/null | sed 's/^v//' | cut -d. -f1)
+if [ -z "$NODE_MAJOR" ] || [ "$NODE_MAJOR" -lt 18 ]; then
+  err "Node.js trop ancien ou absent ($(node --version 2>/dev/null || echo 'aucun')) — purge et nouvelle tentative via NodeSource"
+  apt-get remove -y nodejs libnode-dev libnode72 2>/dev/null || true
+  apt-get autoremove -y 2>/dev/null || true
+  curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
+    && apt-get install -y nodejs \
+    || err "Échec définitif de l'installation de Node.js via NodeSource"
+fi
+
 npm install -g yarn pnpm typescript ts-node eslint prettier pm2 \
   && ok "Node.js $(node --version) + npm globals installés" || err "npm globals non installés"
 
@@ -1091,18 +1110,18 @@ echo "╚═══════════════════════�
 echo ""
 echo "── Outils ──────────────────────────────────────────"
 printf "%-18s %s\n" "Docker:"     "$(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',' || echo N/A)"
-printf "%-18s %s\n" "kubectl:"    "$(kubectl version --client --short 2>/dev/null || echo N/A)"
+printf "%-18s %s\n" "kubectl:"    "$(kubectl version --client 2>/dev/null | grep -oP 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo N/A)"
 printf "%-18s %s\n" "Helm:"       "$(helm version --short 2>/dev/null || echo N/A)"
 printf "%-18s %s\n" "Terraform:"  "$(terraform version -json 2>/dev/null | jq -r '.terraform_version' || echo N/A)"
-printf "%-18s %s\n" "Ansible:"    "$(ansible --version 2>/dev/null | head -1 | awk '{print $3}' || echo N/A)"
+printf "%-18s %s\n" "Ansible:"    "$(ansible --version 2>/dev/null | head -1 | grep -oP '[0-9]+\.[0-9]+\.[0-9]+' || echo N/A)"
 printf "%-18s %s\n" "Vault:"      "$(vault version 2>/dev/null | awk '{print $2}' || echo N/A)"
 printf "%-18s %s\n" "Python:"     "$(python3 --version 2>/dev/null || echo N/A)"
 printf "%-18s %s\n" "Node.js:"    "$(node --version 2>/dev/null || echo N/A)"
 printf "%-18s %s\n" "Go:"         "$(/usr/local/go/bin/go version 2>/dev/null | awk '{print $3}' || echo N/A)"
 printf "%-18s %s\n" "Java:"       "$(java -version 2>&1 | head -1 || echo N/A)"
 printf "%-18s %s\n" "Azure CLI:"  "$(az version 2>/dev/null | jq -r '."azure-cli"' || echo N/A)"
-printf "%-18s %s\n" "Nuclei:"     "$(nuclei -version 2>/dev/null | grep -oP 'v[\d.]+' | head -1 || echo N/A)"
-printf "%-18s %s\n" "Metasploit:" "$(msfconsole -v 2>/dev/null | head -1 || echo N/A)"
+printf "%-18s %s\n" "Nuclei:"     "$(command -v nuclei >/dev/null 2>&1 && nuclei -version 2>&1 | grep -oP 'v[0-9][0-9.]*' | head -1 || echo N/A)"
+printf "%-18s %s\n" "Metasploit:" "$(command -v msfconsole >/dev/null 2>&1 && echo installé || echo N/A)"
 echo ""
 echo "── Containers Docker ───────────────────────────────"
 docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null
@@ -1137,93 +1156,215 @@ cat > /var/www/html/index.html << 'DASHBOARD_EOF'
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DevOps Pro VM — Tableau de bord</title>
+<title>DevOps VM — Tableau de bord</title>
 <style>
   :root{
-    --bg:#0f1117; --panel:#161923; --panel-2:#1d2030; --border:#2a2e3f;
-    --text:#e8e9ee; --muted:#8b8fa3; --accent:#6ee7b7; --accent-2:#60a5fa;
-    --danger:#f87171; --warn:#fbbf24;
+    --bg:#0a0b10; --panel:rgba(22,25,38,.6); --panel-solid:#161926;
+    --border:rgba(255,255,255,.08); --border-hover:rgba(255,255,255,.18);
+    --text:#eef0f6; --muted:#8b8fa8; --muted-2:#5c6079;
+    --accent:#7c5cff; --accent-2:#22d3ee;
+    --up:#34d399; --down:#fb7185; --checking:#f5b942;
+    --radius:18px;
   }
+  body[data-profile="devops"]      { --accent:#60a5fa; --accent-2:#22d3ee; }
+  body[data-profile="dataops"]     { --accent:#34d399; --accent-2:#a3e635; }
+  body[data-profile="cybersecurity"]{ --accent:#fb7185; --accent-2:#f59e0b; }
+  body[data-profile="fullstack"]   { --accent:#a78bfa; --accent-2:#22d3ee; }
+
   *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
   body{
-    margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-    background:radial-gradient(1200px 600px at 10% -10%, #1a2036 0%, var(--bg) 60%);
-    color:var(--text); min-height:100vh; padding:32px 20px 60px;
+    margin:0; min-height:100vh; color:var(--text); background:var(--bg);
+    font-family:"Segoe UI",system-ui,-apple-system,Roboto,sans-serif;
+    overflow-x:hidden;
+    -webkit-font-smoothing:antialiased;
   }
-  .wrap{max-width:960px; margin:0 auto;}
-  header{margin-bottom:28px;}
-  h1{font-size:26px; margin:0 0 6px; letter-spacing:.2px;}
-  .sub{color:var(--muted); font-size:14px;}
-  .profile-badge{
-    display:inline-flex; align-items:center; gap:8px; margin-top:14px;
-    background:var(--panel-2); border:1px solid var(--border); border-radius:999px;
-    padding:8px 16px; font-size:13px; color:var(--accent);
+
+  /* ── Fond animé (mesh gradient) ─────────────────────────── */
+  .bg-mesh{ position:fixed; inset:0; z-index:0; overflow:hidden; }
+  .bg-mesh span{
+    position:absolute; width:46vw; height:46vw; border-radius:50%;
+    filter:blur(90px); opacity:.35; will-change:transform;
   }
-  .profile-badge b{color:var(--text); text-transform:capitalize;}
-  .grid{
-    display:grid; grid-template-columns:repeat(auto-fill, minmax(240px,1fr));
-    gap:16px; margin-top:22px;
+  .bg-mesh span:nth-child(1){ background:var(--accent); top:-15%; left:-10%; animation:float1 22s ease-in-out infinite; }
+  .bg-mesh span:nth-child(2){ background:var(--accent-2); bottom:-20%; right:-10%; animation:float2 26s ease-in-out infinite; }
+  .bg-mesh span:nth-child(3){ background:#ec4899; top:40%; left:60%; width:32vw; height:32vw; opacity:.18; animation:float3 30s ease-in-out infinite; }
+  @keyframes float1{ 0%,100%{transform:translate(0,0)} 50%{transform:translate(6vw,8vh)} }
+  @keyframes float2{ 0%,100%{transform:translate(0,0)} 50%{transform:translate(-5vw,-6vh)} }
+  @keyframes float3{ 0%,100%{transform:translate(0,0) scale(1)} 50%{transform:translate(-4vw,5vh) scale(1.1)} }
+
+  .wrap{ position:relative; z-index:1; max-width:1040px; margin:0 auto; padding:48px 24px 72px; }
+
+  /* ── Header ─────────────────────────────────────────────── */
+  header{ margin-bottom:32px; animation:fadeInUp .6s ease both; }
+  .title-row{ display:flex; align-items:center; gap:14px; }
+  .logo{
+    width:46px; height:46px; border-radius:13px; display:flex; align-items:center; justify-content:center;
+    background:linear-gradient(135deg,var(--accent),var(--accent-2)); flex-shrink:0;
+    box-shadow:0 8px 24px -8px color-mix(in srgb, var(--accent) 60%, transparent);
   }
+  h1{
+    font-size:28px; margin:0; letter-spacing:-.02em; font-weight:700;
+    background:linear-gradient(120deg,#fff, var(--muted) 140%);
+    -webkit-background-clip:text; background-clip:text; color:transparent;
+  }
+  .sub{ color:var(--muted); font-size:14.5px; margin:6px 0 0 60px; }
+
+  .badges{ display:flex; gap:10px; flex-wrap:wrap; margin:20px 0 0 60px; }
+  .badge{
+    display:inline-flex; align-items:center; gap:8px; font-size:12.5px; font-weight:500;
+    padding:7px 14px; border-radius:999px; border:1px solid var(--border);
+    background:var(--panel); backdrop-filter:blur(16px);
+  }
+  .badge b{ color:var(--text); text-transform:capitalize; font-weight:600; }
+  .badge.profile{ color:var(--accent-2); }
+  .badge .pulse-dot{
+    width:7px; height:7px; border-radius:50%; background:var(--up);
+    box-shadow:0 0 0 0 rgba(52,211,153,.6); animation:pulse-ring 2s infinite;
+  }
+
+  /* ── Grid ───────────────────────────────────────────────── */
+  .grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(255px,1fr)); gap:16px; margin-top:28px; }
+
   .card{
-    background:var(--panel); border:1px solid var(--border); border-radius:14px;
-    padding:18px; display:flex; flex-direction:column; gap:10px;
-    transition:transform .15s ease, border-color .15s ease;
+    position:relative; background:var(--panel); border:1px solid var(--border); border-radius:var(--radius);
+    padding:20px; backdrop-filter:blur(18px); overflow:hidden;
+    opacity:0; transform:translateY(16px);
+    animation:fadeInUp .55s cubic-bezier(.2,.8,.2,1) forwards;
+    transition:border-color .25s ease, transform .25s ease, box-shadow .25s ease;
   }
-  .card:hover{transform:translateY(-2px); border-color:#3a3f57;}
-  .card-top{display:flex; align-items:center; justify-content:space-between;}
-  .card-title{display:flex; align-items:center; gap:10px; font-weight:600; font-size:15px;}
-  .icon{font-size:20px;}
-  .dot{width:9px; height:9px; border-radius:50%; background:var(--muted); flex-shrink:0;}
-  .dot.up{background:var(--accent); box-shadow:0 0 8px var(--accent);}
-  .dot.down{background:var(--danger); box-shadow:0 0 8px var(--danger);}
-  .desc{color:var(--muted); font-size:13px; line-height:1.4;}
-  .row{display:flex; gap:8px; margin-top:4px;}
-  a.btn, button.btn{
-    flex:1; text-align:center; text-decoration:none; font-size:13px; font-weight:500;
-    padding:8px 10px; border-radius:8px; border:1px solid var(--border);
-    background:var(--panel-2); color:var(--text); cursor:pointer;
+  .card:hover{
+    border-color:var(--border-hover); transform:translateY(-3px);
+    box-shadow:0 18px 40px -20px rgba(0,0,0,.55);
   }
-  a.btn:hover, button.btn:hover{border-color:var(--accent-2);}
-  .note{font-size:11px; color:var(--muted); margin-top:2px;}
+  .card::before{
+    content:""; position:absolute; inset:0; border-radius:var(--radius); padding:1px;
+    background:linear-gradient(135deg, color-mix(in srgb, var(--accent) 45%, transparent), transparent 55%);
+    -webkit-mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite:xor; mask-composite:exclude; pointer-events:none; opacity:.7;
+  }
+
+  .card-top{ display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; }
+  .card-id{ display:flex; align-items:center; gap:11px; }
+  .icon-box{
+    width:36px; height:36px; border-radius:10px; display:flex; align-items:center; justify-content:center;
+    background:rgba(255,255,255,.06); border:1px solid var(--border); flex-shrink:0;
+  }
+  .icon-box svg{ width:18px; height:18px; stroke:var(--text); }
+  .card-title{ font-weight:600; font-size:15px; }
+
+  .status{ display:flex; align-items:center; gap:7px; font-size:11.5px; color:var(--muted); }
+  .dot{
+    width:9px; height:9px; border-radius:50%; background:var(--muted-2); flex-shrink:0;
+    transition:background .3s ease;
+  }
+  .dot.checking{ background:var(--checking); animation:blink 1s infinite; }
+  .dot.up{ background:var(--up); box-shadow:0 0 0 0 rgba(52,211,153,.55); animation:pulse-ring 1.8s infinite; }
+  .dot.down{ background:var(--down); box-shadow:0 0 10px 0 rgba(251,113,133,.5); }
+
+  .desc{ color:var(--muted); font-size:13px; line-height:1.55; min-height:40px; }
+
+  .row{ display:flex; gap:8px; margin-top:14px; }
+  .btn{
+    flex:1; text-align:center; text-decoration:none; font-size:13px; font-weight:600;
+    padding:9px 10px; border-radius:10px; border:1px solid var(--border);
+    background:rgba(255,255,255,.03); color:var(--text); cursor:pointer;
+    transition:all .2s ease; display:inline-flex; align-items:center; justify-content:center; gap:6px;
+  }
+  .btn.primary{
+    background:linear-gradient(135deg, var(--accent), var(--accent-2)); border:none; color:#0a0b10;
+  }
+  .btn:hover{ transform:translateY(-1px); filter:brightness(1.08); }
+  .btn:active{ transform:translateY(0); }
+  .btn svg{ width:13px; height:13px; }
+
+  .url-line{
+    margin-top:10px; font-size:11px; color:var(--muted-2); font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
+
   .empty{
-    grid-column:1/-1; color:var(--muted); font-size:14px; text-align:center;
-    padding:30px; border:1px dashed var(--border); border-radius:14px;
+    grid-column:1/-1; text-align:center; padding:48px 20px; color:var(--muted);
+    border:1px dashed var(--border); border-radius:var(--radius); font-size:14px;
   }
-  footer{margin-top:36px; color:var(--muted); font-size:12px; text-align:center;}
-  code{background:var(--panel-2); padding:2px 6px; border-radius:6px; font-size:12px;}
+
+  @keyframes fadeInUp{ from{opacity:0; transform:translateY(16px);} to{opacity:1; transform:translateY(0);} }
+  @keyframes blink{ 0%,100%{opacity:1;} 50%{opacity:.35;} }
+  @keyframes pulse-ring{
+    0%{ box-shadow:0 0 0 0 color-mix(in srgb, var(--up) 55%, transparent); }
+    70%{ box-shadow:0 0 0 8px transparent; }
+    100%{ box-shadow:0 0 0 0 transparent; }
+  }
+
+  footer{
+    margin-top:44px; color:var(--muted-2); font-size:12px; text-align:center; line-height:1.8;
+    animation:fadeInUp .6s ease .3s both;
+  }
+  code{ background:rgba(255,255,255,.06); padding:2px 7px; border-radius:6px; font-size:11.5px; color:var(--accent-2); }
+
+  ::selection{ background:color-mix(in srgb, var(--accent) 40%, transparent); }
+
+  @media (max-width:480px){
+    .sub, .badges{ margin-left:0; }
+    .title-row{ flex-direction:column; align-items:flex-start; }
+  }
 </style>
 </head>
 <body>
+
+<div class="bg-mesh"><span></span><span></span><span></span></div>
+
 <div class="wrap">
   <header>
-    <h1>🖥️ DevOps Pro VM</h1>
+    <div class="title-row">
+      <div class="logo">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#0a0b10" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="4" width="18" height="13" rx="2"></rect>
+          <path d="M8 21h8M12 17v4"></path>
+        </svg>
+      </div>
+      <h1>DevOps VM</h1>
+    </div>
     <div class="sub">Tableau de bord des services installés sur cette machine</div>
-    <div class="profile-badge">🏷 Profil actif : <b id="profile-name">-</b></div>
+    <div class="badges">
+      <span class="badge profile"><span class="pulse-dot"></span>Profil actif : <b id="profile-name">-</b></span>
+      <span class="badge" id="count-badge">— services</span>
+      <span class="badge" id="clock-badge">--:--:--</span>
+    </div>
   </header>
 
   <div class="grid" id="grid"></div>
 
   <footer>
-    Statut vérifié depuis votre navigateur (sans données envoyées à un tiers) ·
+    Vérification d'état effectuée depuis votre navigateur, sans donnée envoyée à un tiers ·
     Identifiants générés par Terraform : <code>terraform output</code> ·
     Détails complets : <code>devops-status</code> en SSH
   </footer>
 </div>
 
 <script>
-var PROFILE = "PLACEHOLDER_PROFILE";
-var HOST = window.location.hostname;
+const PROFILE = "PLACEHOLDER_PROFILE";
+const HOST = window.location.hostname;
+document.body.setAttribute("data-profile", PROFILE);
 
-var SERVICES = [
-  { name:"Grafana", icon:"📈", port:3000, https:false, enabled:true,
-    desc:"Dashboards de monitoring. Identifiant admin, mot de passe généré." },
-  { name:"Prometheus", icon:"📉", port:9090, https:false, enabled:true,
+const ICONS = {
+  grafana: '<path d="M3 3v18h18"/><path d="M7 15l4-6 3 3 5-8"/>',
+  prometheus: '<path d="M12 2a7 7 0 0 0-7 7c0 3 2 5 3 7l1 3h6l1-3c1-2 3-4 3-7a7 7 0 0 0-7-7z"/><path d="M9 15h6"/>',
+  portainer: '<path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/>',
+  jupyter: '<circle cx="12" cy="6" r="2.2"/><circle cx="6" cy="16" r="2.2"/><circle cx="18" cy="16" r="2.2"/><path d="M8 15c1.5-2 6.5-2 8 0"/>',
+  vault: '<rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>'
+};
+
+const SERVICES = [
+  { key:"grafana", name:"Grafana", port:3000, https:false, enabled:true,
+    desc:"Dashboards de monitoring. Identifiant admin, mot de passe généré par Terraform." },
+  { key:"prometheus", name:"Prometheus", port:9090, https:false, enabled:true,
     desc:"Moteur de métriques, source de données de Grafana." },
-  { name:"Portainer", icon:"🐋", port:9443, https:true, enabled:true,
+  { key:"portainer", name:"Portainer", port:9443, https:true, enabled:true,
     desc:"Interface de gestion Docker. Certificat auto-signé : acceptez l'avertissement au premier accès." },
-  { name:"JupyterLab", icon:"📊", port:8888, https:false, enabled:PLACEHOLDER_DATAOPS,
+  { key:"jupyter", name:"JupyterLab", port:8888, https:false, enabled:PLACEHOLDER_DATAOPS,
     desc:"Notebooks Python / data science. Lien avec token déjà inclus." },
-  { name:"Vault", icon:"🔐", port:8200, https:false, enabled:PLACEHOLDER_DEVOPS,
+  { key:"vault", name:"Vault", port:8200, https:false, enabled:PLACEHOLDER_DEVOPS,
     desc:"Secrets management HashiCorp. Root token dans /root/.vault-init sur la VM." }
 ];
 
@@ -1231,85 +1372,92 @@ function buildUrl(s){
   return (s.https ? "https://" : "http://") + HOST + ":" + s.port;
 }
 
-function makeCard(s){
-  var url = buildUrl(s);
-  var card = document.createElement("div");
+function svgIcon(paths, cls){
+  return `<svg class="${cls||''}" viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
+}
+
+function makeCard(s, index){
+  const url = buildUrl(s);
+  const card = document.createElement("div");
   card.className = "card";
+  card.style.animationDelay = (index * 90) + "ms";
 
-  var top = document.createElement("div");
-  top.className = "card-top";
-  var title = document.createElement("div");
-  title.className = "card-title";
-  title.innerHTML = '<span class="icon">' + s.icon + '</span><span>' + s.name + '</span>';
-  var dot = document.createElement("span");
-  dot.className = "dot";
-  dot.id = "dot-" + s.name;
-  top.appendChild(title);
-  top.appendChild(dot);
-  card.appendChild(top);
+  card.innerHTML = `
+    <div class="card-top">
+      <div class="card-id">
+        <div class="icon-box">${svgIcon(ICONS[s.key])}</div>
+        <div class="card-title">${s.name}</div>
+      </div>
+      <div class="status"><span class="dot checking" id="dot-${s.key}"></span><span id="label-${s.key}">vérif.</span></div>
+    </div>
+    <div class="desc">${s.desc}</div>
+    <div class="row">
+      <a class="btn primary" href="${url}" target="_blank" rel="noopener">
+        ${svgIcon('<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14L21 3"/>')}
+        Ouvrir
+      </a>
+      <button class="btn" data-copy="${url}">
+        ${svgIcon('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>')}
+        Copier
+      </button>
+    </div>
+    <div class="url-line">${url}</div>
+  `;
 
-  var desc = document.createElement("div");
-  desc.className = "desc";
-  desc.textContent = s.desc;
-  card.appendChild(desc);
-
-  var row = document.createElement("div");
-  row.className = "row";
-  var open = document.createElement("a");
-  open.className = "btn";
-  open.href = url;
-  open.target = "_blank";
-  open.rel = "noopener";
-  open.textContent = "Ouvrir";
-  var copy = document.createElement("button");
-  copy.className = "btn";
-  copy.textContent = "Copier le lien";
-  copy.onclick = function(){
-    navigator.clipboard.writeText(url).then(function(){
-      copy.textContent = "Copié !";
-      setTimeout(function(){ copy.textContent = "Copier le lien"; }, 1500);
+  card.querySelector("[data-copy]").addEventListener("click", function(){
+    navigator.clipboard.writeText(url).then(() => {
+      const btn = this;
+      const original = btn.innerHTML;
+      btn.innerHTML = svgIcon('<path d="M20 6L9 17l-5-5"/>') + "Copié !";
+      setTimeout(() => { btn.innerHTML = original; }, 1600);
     });
-  };
-  row.appendChild(open);
-  row.appendChild(copy);
-  card.appendChild(row);
-
-  var note = document.createElement("div");
-  note.className = "note";
-  note.textContent = url;
-  card.appendChild(note);
+  });
 
   return card;
 }
 
 function checkStatus(s){
-  var dot = document.getElementById("dot-" + s.name);
-  if(!dot) return;
-  var url = buildUrl(s);
-  var controller = new AbortController();
-  var timer = setTimeout(function(){ controller.abort(); }, 2500);
-  fetch(url, { mode:"no-cors", signal:controller.signal })
-    .then(function(){ clearTimeout(timer); dot.className = "dot up"; })
-    .catch(function(){ clearTimeout(timer); dot.className = "dot down"; });
+  const dot = document.getElementById("dot-" + s.key);
+  const label = document.getElementById("label-" + s.key);
+  if(!dot) return Promise.resolve(false);
+  const url = buildUrl(s);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 2500);
+  return fetch(url, { mode:"no-cors", signal:controller.signal })
+    .then(() => { clearTimeout(timer); dot.className = "dot up"; label.textContent = "en ligne"; return true; })
+    .catch(() => { clearTimeout(timer); dot.className = "dot down"; label.textContent = "injoignable"; return false; });
+}
+
+function updateCount(active){
+  Promise.all(active.map(checkStatus)).then(results => {
+    const up = results.filter(Boolean).length;
+    document.getElementById("count-badge").textContent = up + " / " + active.length + " services en ligne";
+  });
+}
+
+function tickClock(){
+  const el = document.getElementById("clock-badge");
+  if(el) el.textContent = new Date().toLocaleTimeString("fr-FR");
 }
 
 function render(){
   document.getElementById("profile-name").textContent = PROFILE;
-  var grid = document.getElementById("grid");
+  const grid = document.getElementById("grid");
   grid.innerHTML = "";
-  var active = SERVICES.filter(function(s){ return s.enabled; });
+  const active = SERVICES.filter(s => s.enabled);
+
   if(active.length === 0){
-    var empty = document.createElement("div");
-    empty.className = "empty";
-    empty.textContent = "Aucun service web pour ce profil.";
-    grid.appendChild(empty);
+    grid.innerHTML = '<div class="empty">Aucun service web pour ce profil.</div>';
+    document.getElementById("count-badge").textContent = "0 service";
     return;
   }
-  active.forEach(function(s){
-    grid.appendChild(makeCard(s));
-    checkStatus(s);
-  });
-  setInterval(function(){ active.forEach(checkStatus); }, 15000);
+
+  active.forEach((s, i) => grid.appendChild(makeCard(s, i)));
+  updateCount(active);
+  setInterval(() => updateCount(active), 15000);
+
+  tickClock();
+  setInterval(tickClock, 1000);
 }
 
 render();

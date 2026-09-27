@@ -213,6 +213,19 @@ Le déploiement repose sur 5 fichiers Terraform et un script cloud-init, chacun 
 
 Lancer le cloud Shell depuis le portal Azure et choisir PowerShell.
 
+> ⚠️ **Piège fréquent avec Cloud Shell** : `allowed_ssh_cidr = "auto"`
+> détecte l'IP de la machine qui exécute `terraform apply` — donc celle de
+> **Cloud Shell**, pas celle de votre PC. Si vous déployez depuis Cloud
+> Shell, SSH fonctionnera depuis Cloud Shell, mais votre navigateur (sur un
+> réseau différent) sera bloqué par le NSG sur tous les services (dashboard
+> excepté, volontairement public sur le port 80). Corrigez après coup avec :
+> ```bash
+> terraform apply -auto-approve -var="allowed_ssh_cidr=<VOTRE_IP_RÉELLE>/32"
+> ```
+> Trouvez votre IP réelle en ouvrant `https://ifconfig.me` **depuis votre
+> propre navigateur** (pas depuis Cloud Shell). Comparez avec `terraform
+> output allowed_ssh_cidr_effective` pour confirmer le décalage.
+
 ### 2. Cloner et configurer
 
 ```bash

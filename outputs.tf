@@ -22,6 +22,11 @@ output "ssh_command" {
   value       = "ssh -i keys/${var.vm_name}_id_rsa ${var.admin_username}@${azurerm_public_ip.pip.ip_address}"
 }
 
+output "admin_username" {
+  description = "Nom d'utilisateur SSH / système sur la VM"
+  value       = var.admin_username
+}
+
 output "ssh_key_path" {
   description = "Chemin vers la clé SSH privée"
   value       = "${path.module}/keys/${var.vm_name}_id_rsa"

@@ -168,3 +168,48 @@ testé isolément (`node --check` sur le JavaScript, parsing HTML) après
 simulation de la substitution des variables de profil — aucune erreur.
 Comme pour le reste du projet, un test visuel dans un vrai navigateur après
 déploiement Azure reste la meilleure validation finale.
+
+---
+
+## Ajout ultérieur — Retours d'un premier déploiement réel
+
+Un premier déploiement réel (profil `fullstack`) a permis d'identifier trois
+problèmes que la validation statique ne pouvait pas détecter :
+
+1. **Aucun lien du dashboard ne fonctionnait.** Cause : `terraform apply` avait
+   été lancé depuis Azure Cloud Shell, dont l'IP de sortie diffère de celle du
+   navigateur de l'utilisateur. `allowed_ssh_cidr = "auto"` avait donc
+   autorisé l'IP de Cloud Shell (ce qui explique que le SSH depuis Cloud Shell
+   fonctionnait), mais bloqué le navigateur de l'utilisateur sur tous les
+   ports sauf le 80 (dashboard, volontairement public) — d'où tous les points
+   rouges. **Ce n'est pas un bug du code, mais une limite inhérente à la
+   détection automatique d'IP** : elle capture l'IP de la machine qui exécute
+   `terraform apply`, pas celle du poste qui naviguera ensuite vers la VM.
+   Remède : `terraform apply -var="allowed_ssh_cidr=<IP réelle>/32"` depuis
+   n'importe quel terminal pour corriger le NSG sans tout redéployer. Un
+   avertissement plus visible sur ce point serait une amélioration future
+   possible (ex: détecter si l'environnement est Cloud Shell et prévenir).
+
+2. **Metasploit ne s'installait pas (`403 Forbidden` sur `apt.metasploit.com`).**
+   Le dépôt apt officiel de Rapid7 pour Metasploit est devenu indisponible.
+   → Remplacé par l'installeur "omnibus" officiel de Rapid7
+   (`msfupdate.erb`), qui ne dépend pas de ce dépôt.
+
+3. **Node.js installé en version 12 (Ubuntu) au lieu de la LTS actuelle.**
+   Le script exécutait le script d'installation NodeSource sans vérifier
+   s'il avait réussi ; en cas d'échec silencieux, `apt-get install -y
+   nodejs` retombait sur le paquet `nodejs` obsolète des dépôts Ubuntu
+   (12.22.9) sans qu'aucune erreur ne soit visible. → Le script vérifie
+   désormais la version installée après coup et refait une tentative
+   NodeSource si elle est inférieure à 18.
+
+4. **`devops-status` affichait `kubectl: N/A` alors que kubectl était bien
+   installé**, à cause du flag `--short` de `kubectl version`, supprimé dans
+   kubectl ≥ 1.28. De même, `Ansible: 2.17.14]` affichait un crochet
+   parasite car `ansible --version | awk '{print $3}'` capturait le `]` de
+   sortie `ansible [core 2.17.14]`. Les deux lignes ont été corrigées pour
+   extraire proprement le numéro de version avec une regex, quel que soit le
+   format de sortie de l'outil.
+
+Un script `fix-existing-vm.sh` a été fourni séparément pour corriger une VM
+déjà déployée sans avoir à la recréer.
