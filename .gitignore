@@ -1,0 +1,19 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Clés SSH générées automatiquement par Terraform : NE JAMAIS committer
+keys/*
+!keys/.gitkeep
+
+# Divers
+.DS_Store
+*.log

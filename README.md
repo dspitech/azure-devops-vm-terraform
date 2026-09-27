@@ -1,6 +1,5 @@
-# DevOps VM - Azure Students
+# DevOps VM — Azure Students
 
-### Nom : Lo | Prénom : Pape | Email : pape.lo@estiam.com
 <div align="center">
 
 ![Azure](https://img.shields.io/badge/Azure-0089D6?style=for-the-badge&logo=microsoft-azure&logoColor=white)
@@ -10,12 +9,33 @@
 ![Kubernetes](https://img.shields.io/badge/Kubernetes-326CE5?style=for-the-badge&logo=kubernetes&logoColor=white)
 ![Security](https://img.shields.io/badge/Pentest-Ready-brightgreen?style=for-the-badge&logo=kalilinux&logoColor=white)
 
-**VM DevOps tout-en-un déployée sur Azure via Terraform**
-*Version 1.0 · DevOps · DataOps · Pentest · SRE*
-
-[Objectif](#objectif) • [Architecture](#architecture-terraform) • [Déploiement](#déploiement-en-5-étapes) • [Services](#accéder-aux-services) • [Logiciels](#logiciels-installés) • [Sécurité](#sécurité-et-nsg) • [Coût](#coût-estimé-azure-students--100an-de-crédit)
+**VM DevOps préconfigurée, déployée sur Azure en une commande via Terraform**
+*Profils DevOps · DataOps · Cybersécurité · Fullstack*
 
 </div>
+
+---
+
+## Sommaire
+
+- [Objectif](#objectif)
+- [Profils étudiants (`vm_profile`)](#profils-étudiants-vm_profile)
+- [Structure des fichiers](#structure-des-fichiers)
+- [Prérequis](#prérequis)
+- [Variables Terraform](#variables-terraform)
+- [Architecture](#architecture)
+- [Démarrage rapide](#démarrage-rapide)
+- [Accéder aux services](#5-accéder-aux-services)
+- [Logiciels installés automatiquement](#logiciels-installés-automatiquement)
+- [Sécurité et réseau](#sécurité-et-réseau)
+- [Coût estimé](#coût-estimé-azure-students--100an-de-crédit)
+- [Script cloud-init](#script-cloud-init--installation-automatique)
+- [Commandes utiles post-déploiement](#commandes-utiles-post-déploiement)
+- [Dépannage](#dépannage)
+- [Maintenance](#maintenance-de-la-vm)
+- [Destruction de l'infrastructure](#destruction-de-linfrastructure)
+- [Contribution](#contribution)
+- [Auteur](#auteur)
 
 ---
 
@@ -27,10 +47,51 @@ En quelques minutes, Terraform déploie sur Azure une machine virtuelle Ubuntu 2
 
 - **DevOps et CI/CD** : Docker, Kubernetes, Terraform, Ansible, Vault, ArgoCD, GitHub Actions et bien d'autres.
 - **Pentest et sécurité offensive** : Metasploit, Nuclei, ffuf, sqlmap, Hydra, Amass et un répertoire de travail dédié.
-- **DataOps et Data Science** : JupyterLab, Airflow, Spark, dbt, pandas, scikit-learn et les principaux SDKs cloud.
+- **DataOps et Data Science** : JupyterLab, Spark, dbt, pandas, scikit-learn et les principaux SDKs cloud.
 - **SRE et monitoring** : Prometheus, Grafana, Node Exporter, Trivy et fail2ban préconfigurés.
 
-Que vous soyez en cours de formation, en stage ou en poste, cette VM vous permet de démarrer immédiatement sur un environnement standardisé, reproductible et prêt pour des cas d'usage réels.
+Que vous soyez en cours de formation, en stage ou en poste, cette VM vous permet de démarrer immédiatement sur un environnement standardisé, reproductible et prêt pour des cas d'usage réels. L'installation est **résiliente** : si un outil isolé échoue à s'installer (indisponibilité ponctuelle d'une API tierce, par exemple), le reste de l'installation continue et va jusqu'au bout.
+
+---
+
+## Profils étudiants (`vm_profile`)
+
+Plutôt que d'installer systématiquement tous les outils (installation plus
+longue, VM plus chargée), le projet propose 4 profils. Le socle commun
+(Docker + Portainer, Prometheus + Grafana, PostgreSQL + Redis, sécurité de
+base UFW/fail2ban) est **toujours installé**, quel que soit le profil.
+
+| Profil | Pour qui | Outils ajoutés au socle commun |
+|---|---|---|
+| `devops` | Étudiants DevOps / Cloud / SRE | Kubernetes (kubectl, Helm, k9s, kind), Terraform/Terragrunt/Packer/Ansible, CI/CD (Azure CLI, GitHub CLI, ArgoCD, act, Vault, Skaffold, Stern, cosign), Trivy/Hadolint, Go/Node.js/Rust/Java |
+| `dataops` | Étudiants Data / IA / ML | JupyterLab, pandas/polars/numpy/scikit-learn/xgboost/mlflow, dbt-core, PySpark, Dask, FastAPI, Go/Node.js/Rust/Java |
+| `cybersecurity` | Étudiants Cybersécurité / Pentest | Outils réseau (masscan, tshark, VPN), Nuclei, ffuf, gobuster, Amass, theHarvester, Metasploit, Hydra, sqlmap, John the Ripper, wordlists |
+| `fullstack` (défaut) | Formation généraliste, labo tout-en-un | Tout ce qui précède, réuni |
+
+**Déployer un profil précis** — un fichier d'exemple prêt à l'emploi existe pour chacun dans `examples/` :
+
+```bash
+terraform apply -var-file="examples/devops.tfvars"
+# ou : dataops.tfvars / cybersecurity.tfvars / fullstack.tfvars
+```
+
+Vous pouvez aussi simplement fixer `vm_profile` dans votre propre
+`terraform.tfvars` :
+
+```hcl
+vm_profile = "dataops"   # "devops" | "dataops" | "cybersecurity" | "fullstack"
+```
+
+Le NSG Azure n'ouvre que les ports des services réellement installés pour le
+profil choisi (par exemple, le port 8888/Jupyter n'est ouvert que pour
+`dataops`/`fullstack`), et `cloud-init/install.sh` saute proprement les
+phases non concernées (visible dans `/var/log/devops-install.log` et via
+`devops-status`, qui affiche le profil actif).
+
+Un **tableau de bord de statut** est généré automatiquement (voir
+[Accéder aux services](#5-accéder-aux-services)) : accessible sur
+`http://<IP>/`, il affiche le profil actif et un lien direct + un indicateur
+d'état en temps réel pour chaque service installé.
 
 ---
 
@@ -39,14 +100,19 @@ Que vous soyez en cours de formation, en stage ou en poste, cette VM vous permet
 ```
 azure-devops-vm/
 ├── provider.tf          # Configuration provider AzureRM
-├── main.tf              # VM, disques, IPs, clés SSH
-├── network.tf           # VNet, Subnet, NSG (pare-feu)
-├── variables.tf         # Définition des variables
-├── terraform.tfvars     # Vos valeurs personnalisées
-├── outputs.tf           # IPs, URL, commandes SSH
+├── main.tf              # VM, disques, IPs, clés SSH, mots de passe générés
+├── network.tf           # VNet, Subnet, NSG (pare-feu, adapté au profil)
+├── variables.tf         # Définition des variables (dont vm_profile)
+├── terraform.tfvars     # Vos valeurs personnalisées (profil "fullstack" par défaut)
+├── examples/            # Fichiers .tfvars prêts à l'emploi par profil
+│   ├── devops.tfvars
+│   ├── dataops.tfvars
+│   ├── cybersecurity.tfvars
+│   └── fullstack.tfvars
+├── outputs.tf           # IPs, URLs, mots de passe générés, commandes SSH
 ├── cloud-init/
-│   └── install.sh       # Script d'installation automatique (~20 min)
-└── keys/                # Clés SSH (générées par Terraform)
+│   └── install.sh       # Script d'installation automatique, adapté au profil
+└── keys/                # Clés SSH (générées par Terraform, ignorées par git)
 ```
 
 ---
@@ -72,19 +138,19 @@ Les variables se définissent dans `terraform.tfvars`. Voici les principales :
 | `location` | `westeurope` | Région Azure de déploiement |
 | `vm_size` | `Standard_B2ms` | Taille de la VM (2 vCPU / 8 GB RAM) |
 | `admin_username` | `devopsadmin` | Nom de l'utilisateur SSH |
+| `vm_profile` | `"fullstack"` | `"devops"` \| `"dataops"` \| `"cybersecurity"` \| `"fullstack"` — voir la section [Profils étudiants](#profils-étudiants-vm_profile) |
 | `os_disk_size_gb` | `64` | Taille du disque OS en GB |
 | `data_disk_size_gb` | `64` | Taille du disque de données en GB |
 | `vnet_address_space` | `10.0.0.0/16` | Plage d'adresses du réseau virtuel |
 | `subnet_address_prefix` | `10.0.1.0/24` | Plage d'adresses du sous-réseau |
-| `allowed_ssh_cidr` | **À définir** | Votre IP publique au format CIDR (`90.x.x.x/32`) |
+| `allowed_ssh_cidr` | `"auto"` | IP publique du déployeur, détectée **automatiquement** (aucune saisie requise). Une valeur explicite (`"90.x.x.x/32"`) ou `"*"` restent possibles. |
 | `tags` | `{}` | Tags Azure appliqués à toutes les ressources |
 
-Exemple de `terraform.tfvars` minimal :
+Exemple de `terraform.tfvars` minimal (fonctionne tel quel, `allowed_ssh_cidr` s'auto-détecte) :
 
 ```hcl
-vm_name          = "devops-pro-vm"
-location         = "westeurope"
-allowed_ssh_cidr = "90.12.34.56/32"   # curl ifconfig.me
+vm_name  = "devops-pro-vm"
+location = "westeurope"
 
 tags = {
   environment = "student"
@@ -94,575 +160,58 @@ tags = {
 
 ---
 
-## Architecture Terraform
+## Architecture
 
-Cette section explique chaque fichier Terraform et son rôle dans l'infrastructure.
-
-###  provider.tf - Configuration des providers
-
-**Rôle** : Configure les providers (AzureRM, Random, TLS) et leurs versions minimales.
-
-```hcl
-# =============================================================
-#  PROVIDER — AzureRM
-#  Authentification via Azure CLI (az login)
-#  ou variables d'environnement ARM_*
-# =============================================================
-
-provider "azurerm" {
-  features {
-    resource_group {
-      prevent_deletion_if_contains_resources = false
-    }
-    virtual_machine {
-      delete_os_disk_on_deletion     = true
-      graceful_shutdown              = false
-      skip_shutdown_and_force_delete = false
-    }
-    key_vault {
-      purge_soft_delete_on_destroy    = true
-      recover_soft_deleted_key_vaults = true
-    }
-  }
-
-  # ── Optionnel : renseigner ici ou via variables d'env ──────
-  # subscription_id = var.subscription_id
-  # tenant_id       = var.tenant_id
-  # client_id       = var.client_id
-  # client_secret   = var.client_secret
-}
-
-provider "random" {}
-provider "tls" {}
+```
+                         Internet
+                            │
+                 ┌──────────┴──────────┐
+                  IP Publique (Standard)
+                 └──────────┬──────────┘
+                            │
+                  ╔═════════▼═════════╗
+                  ║   NSG (pare-feu)   ║  ← ports ouverts selon vm_profile
+                  ╚═════════┬═════════╝
+                            │
+                 VNet 10.0.0.0/16
+                 └─ Subnet 10.0.1.0/24
+                            │
+                  ┌─────────▼─────────┐
+                  │   VM Ubuntu 22.04  │
+                  │  (cloud-init boot) │
+                  ├────────────────────┤
+                  │ Disque OS (64 GB)  │
+                  │ Disque data (64+)  │──▶ /data
+                  └────────────────────┘
 ```
 
-**Explications clés** :
-- `azurerm` : provider officiel HashiCorp pour Azure
-- `features` : configure les comportements de suppression (utile pour les environnements dev)
-- `random` : génère des suffixes uniques pour éviter les conflits de noms globaux
-- `tls` : génère les clés SSH RSA 4096 bits pour l'accès à la VM
+Le déploiement repose sur 5 fichiers Terraform et un script cloud-init, chacun avec une responsabilité unique :
+
+| Fichier | Rôle |
+|---|---|
+| `provider.tf` | Déclare les providers utilisés (AzureRM, random, tls, local, http) et leurs versions minimales. |
+| `variables.tf` | Déclare toutes les variables d'entrée (taille de VM, réseau, `vm_profile`, `allowed_ssh_cidr`...) avec valeurs par défaut et validations. |
+| `main.tf` | Crée la VM, les disques, la clé SSH (générée), les mots de passe (Grafana/Jupyter/Portainer, générés), détecte l'IP publique du déployeur, et injecte tout ça dans le script cloud-init. |
+| `network.tf` | VNet, Subnet, IP publique, NSG — les règles de pare-feu s'adaptent automatiquement au profil choisi (`vm_profile`). |
+| `outputs.tf` | Toutes les valeurs utiles après déploiement : IP, commande SSH, URLs des services, mots de passe générés (marqués `sensitive`). |
+| `cloud-init/install.sh` | Exécuté au premier démarrage de la VM. Installe et configure les outils en 13 phases, en sautant celles qui ne concernent pas le profil actif. |
+
+**Décisions de conception clés :**
+
+- **Rien à saisir à la main** : l'IP publique du déployeur est détectée automatiquement (`allowed_ssh_cidr = "auto"`), et les mots de passe de Grafana/Jupyter/Portainer sont générés par Terraform plutôt que codés en dur.
+- **Résilience** : `install.sh` continue même si un outil isolé échoue à s'installer (ex : rate-limit temporaire d'une API tierce) — chaque étape est indépendante et journalisée dans `/var/log/devops-install.log`.
+- **Profils** : un seul jeu de fichiers Terraform, un seul script cloud-init — le comportement s'adapte via la variable `vm_profile` plutôt que via des branches de code séparées.
+- **Visibilité** : un tableau de bord web (`http://<IP>/`) et une commande `devops-status` en SSH donnent à tout moment une vue claire de ce qui est installé et de son état.
+
+> L'historique détaillé des choix techniques et des corrections apportées au projet est disponible dans [`CHANGELOG-CORRECTIONS.md`](./CHANGELOG-CORRECTIONS.md).
 
 ---
 
-###  variables.tf - Définition des paramètres
-
-**Rôle** : Déclare toutes les variables Terraform utilisées dans le projet.
-
-```hcl
-# =============================================================
-#  VARIABLES
-# =============================================================
-
-# ─── General ─────────────────────────────────────────────────
-variable "resource_group_name" {
-  description = "Nom du Resource Group Azure"
-  type        = string
-  default     = "rg-devops-vm"
-}
-
-variable "location" {
-  description = "Région Azure (students → westeurope recommandé)"
-  type        = string
-  default     = "norwayeast"
-}
-
-variable "tags" {
-  description = "Tags appliqués à toutes les ressources"
-  type        = map(string)
-  default = {
-    Environment = "Dev"
-    Project     = "DevOps-Pro-VM"
-    Owner       = "Student"
-    ManagedBy   = "Terraform"
-  }
-}
-
-# ─── VM ──────────────────────────────────────────────────────
-variable "vm_name" {
-  description = "Nom de la VM"
-  type        = string
-  default     = "devops-pro-vm"
-}
-
-variable "vm_size" {
-  description = <<EOT
-Taille de la VM Azure.
-Recommandé pour Azure Students :
-  - Standard_B2s   → 2 vCPU / 4 GB  (économique)
-  - Standard_B2ms  → 2 vCPU / 8 GB  (confortable)
-  - Standard_B4ms  → 4 vCPU / 16 GB (pro)
-EOT
-  type    = string
-  default = "Standard_B2ms"
-}
-
-variable "admin_username" {
-  description = "Nom d'utilisateur administrateur"
-  type        = string
-  default     = "devopsadmin"
-}
-
-variable "os_disk_size_gb" {
-  description = "Taille du disque OS en GB"
-  type        = number
-  default     = 64
-}
-
-variable "data_disk_size_gb" {
-  description = "Taille du disque de données en GB (projets, datasets)"
-  type        = number
-  default     = 64
-}
-
-variable "vm_private_ip" {
-  description = "IP privée statique de la VM"
-  type        = string
-  default     = "10.0.1.10"
-}
-
-# ─── Network ─────────────────────────────────────────────────
-variable "vnet_address_space" {
-  description = "Espace d'adressage du VNet"
-  type        = string
-  default     = "10.0.0.0/16"
-}
-
-variable "subnet_address_prefix" {
-  description = "Préfixe du sous-réseau"
-  type        = string
-  default     = "10.0.1.0/24"
-}
-
-variable "dns_servers" {
-  description = "Serveurs DNS du VNet"
-  type        = list(string)
-  default     = ["8.8.8.8", "1.1.1.1"]
-}
-
-variable "allowed_ssh_cidr" {
-  description = <<EOT
-CIDR autorisé pour SSH et outils (Jupyter, Grafana…).
-Par défaut ouvert - RESTREINDRE à votre IP en production :
-  ex: "90.12.34.56/32"
-EOT
-  type    = string
-  default = "*"
-}
-```
-
-**Explications clés** :
-- Toutes les variables ont des valeurs par défaut sensées
-- `tags` appliqués à TOUTES les ressources (traçabilité Azure)
-- `vm_size` : B2ms = 2 vCPU / 8 GB RAM (bon compromis coût/performance)
-- `allowed_ssh_cidr` : **TRÈS IMPORTANT** — restreignez votre IP en production
-
----
-
-###  main.tf - Ressources centrales (VM, stockage, clés SSH)
-
-**Rôle** : Crée la machine virtuelle, les disques, les clés SSH, les IPs publiques et le groupe de ressources.
-
-```hcl
-# =============================================================
-#  AZURE DEVOPS / DATAOPS / NETWORK ADMIN PRO VM
-#  Ubuntu 22.04 LTS - Azure Students Subscription
-# =============================================================
-
-terraform {
-  required_version = ">= 1.5.0"
-  required_providers {
-    azurerm = {
-      source  = "hashicorp/azurerm"
-      version = "~> 3.90"
-    }
-    random = {
-      source  = "hashicorp/random"
-      version = "~> 3.5"
-    }
-    tls = {
-      source  = "hashicorp/tls"
-      version = "~> 4.0"
-    }
-  }
-}
-
-# ─── Resource Group ──────────────────────────────────────────
-resource "azurerm_resource_group" "rg" {
-  name     = var.resource_group_name
-  location = var.location
-  tags     = var.tags
-}
-
-# ─── Random suffix (unique names) ────────────────────────────
-resource "random_string" "suffix" {
-  length  = 6
-  special = false
-  upper   = false
-}
-
-# ─── SSH Key pair (generated by Terraform) ───────────────────
-resource "tls_private_key" "ssh" {
-  algorithm = "RSA"
-  rsa_bits  = 4096
-}
-
-resource "local_sensitive_file" "private_key" {
-  content         = tls_private_key.ssh.private_key_pem
-  filename        = "${path.module}/keys/${var.vm_name}_id_rsa"
-  file_permission = "0600"
-}
-
-resource "local_file" "public_key" {
-  content  = tls_private_key.ssh.public_key_openssh
-  filename = "${path.module}/keys/${var.vm_name}_id_rsa.pub"
-}
-
-# ─── Storage Account (boot diagnostics) ──────────────────────
-resource "azurerm_storage_account" "diag" {
-  name                     = "diag${random_string.suffix.result}"
-  resource_group_name      = azurerm_resource_group.rg.name
-  location                 = azurerm_resource_group.rg.location
-  account_tier             = "Standard"
-  account_replication_type = "LRS"
-  tags                     = var.tags
-}
-
-# ─── Public IP ───────────────────────────────────────────────
-resource "azurerm_public_ip" "pip" {
-  name                = "${var.vm_name}-pip"
-  resource_group_name = azurerm_resource_group.rg.name
-  location            = azurerm_resource_group.rg.location
-  allocation_method   = "Static"
-  sku                 = "Standard"
-  domain_name_label   = "${var.vm_name}-${random_string.suffix.result}"
-  tags                = var.tags
-}
-
-# ─── Network Interface ────────────────────────────────────────
-resource "azurerm_network_interface" "nic" {
-  name                = "${var.vm_name}-nic"
-  resource_group_name = azurerm_resource_group.rg.name
-  location            = azurerm_resource_group.rg.location
-
-  ip_configuration {
-    name                          = "internal"
-    subnet_id                     = azurerm_subnet.subnet.id
-    private_ip_address_allocation = "Static"
-    private_ip_address            = var.vm_private_ip
-    public_ip_address_id          = azurerm_public_ip.pip.id
-  }
-  tags = var.tags
-}
-
-# ─── Associate NIC → NSG ─────────────────────────────────────
-resource "azurerm_network_interface_security_group_association" "nic_nsg" {
-  network_interface_id      = azurerm_network_interface.nic.id
-  network_security_group_id = azurerm_network_security_group.nsg.id
-}
-
-# ─── Virtual Machine ─────────────────────────────────────────
-resource "azurerm_linux_virtual_machine" "vm" {
-  name                = var.vm_name
-  resource_group_name = azurerm_resource_group.rg.name
-  location            = azurerm_resource_group.rg.location
-  size                = var.vm_size
-
-  admin_username = var.admin_username
-  disable_password_authentication = true
-
-  admin_ssh_key {
-    username   = var.admin_username
-    public_key = tls_private_key.ssh.public_key_openssh
-  }
-
-  os_disk {
-    caching              = "ReadWrite"
-    storage_account_type = "Premium_LRS"
-    disk_size_gb         = var.os_disk_size_gb
-  }
-
-  source_image_reference {
-    publisher = "Canonical"
-    offer     = "0001-com-ubuntu-server-jammy"
-    sku       = "22_04-lts-gen2"
-    version   = "latest"
-  }
-
-  network_interface_ids = [azurerm_network_interface.nic.id]
-
-  boot_diagnostics {
-    storage_account_uri = azurerm_storage_account.diag.primary_blob_endpoint
-  }
-
-  custom_data = base64encode(file("${path.module}/cloud-init/install.sh"))
-
-  tags = var.tags
-}
-
-# ─── Data Disk ───────────────────────────────────────────────
-resource "azurerm_managed_disk" "data_disk" {
-  name                = "${var.vm_name}-data-disk"
-  resource_group_name = azurerm_resource_group.rg.name
-  location            = azurerm_resource_group.rg.location
-  storage_account_type = "Premium_LRS"
-  create_option        = "Empty"
-  disk_size_gb         = var.data_disk_size_gb
-  tags                 = var.tags
-}
-
-resource "azurerm_virtual_machine_data_disk_attachment" "attach_data" {
-  virtual_machine_id    = azurerm_linux_virtual_machine.vm.id
-  managed_disk_id       = azurerm_managed_disk.data_disk.id
-  lun                   = 0
-  caching               = "ReadWrite"
-}
-```
-
-**Explications clés** :
-- `azurerm_resource_group` : conteneur logique pour tous les services
-- `tls_private_key` : génère une clé SSH RSA 4096 bits (idéal pour production)
-- `azurerm_public_ip` : IP statique (ne change pas au reboot, importante pour les DNS)
-- `azurerm_linux_virtual_machine` : Ubuntu 22.04 avec clé SSH uniquement (pas de mot de passe)
-- `custom_data` : exécute automatiquement `install.sh` (cloud-init)
-- `azurerm_managed_disk` : disque de données Premium SSD (montable sur `/data`)
-
----
-
-###  network.tf - Réseau virtuel, sous-réseau, NSG (pare-feu)
-
-**Rôle** : Configure le réseau Azure (VNet, Subnet, NSG avec règles pare-feu).
-
-```hcl
-# =============================================================
-#  NETWORK — VNet / Subnet / NSG
-#  Ports ouverts : 22, 80, 443, 8888, 3000, 9090, 9443, 8200
-#  Ports internes VNet uniquement : 9100, 5432, 3306, 6379, 27017
-# =============================================================
-
-# ─── Virtual Network ─────────────────────────────────────────
-resource "azurerm_virtual_network" "vnet" {
-  name                = "${var.vm_name}-vnet"
-  resource_group_name = azurerm_resource_group.rg.name
-  location            = azurerm_resource_group.rg.location
-  address_space       = [var.vnet_address_space]
-  dns_servers         = var.dns_servers
-  tags                = var.tags
-}
-
-# ─── Subnet ──────────────────────────────────────────────────
-resource "azurerm_subnet" "subnet" {
-  name                 = "${var.vm_name}-subnet"
-  resource_group_name  = azurerm_resource_group.rg.name
-  virtual_network_name = azurerm_virtual_network.vnet.name
-  address_prefixes     = [var.subnet_address_prefix]
-}
-
-# ─── Network Security Group ───────────────────────────────────
-resource "azurerm_network_security_group" "nsg" {
-  name                = "${var.vm_name}-nsg"
-  resource_group_name = azurerm_resource_group.rg.name
-  location            = azurerm_resource_group.rg.location
-  tags                = var.tags
-
-  # ── SSH ──────────────────────────────────────────────────
-  # Restreint à votre IP uniquement (var.allowed_ssh_cidr)
-  security_rule {
-    name                       = "allow-ssh"
-    priority                   = 100
-    direction                  = "Inbound"
-    access                     = "Allow"
-    protocol                   = "Tcp"
-    source_port_range          = "*"
-    destination_port_range     = "22"
-    source_address_prefix      = var.allowed_ssh_cidr
-    destination_address_prefix = "*"
-  }
-
-  # ── HTTP ─────────────────────────────────────────────────
-  security_rule {
-    name                       = "allow-http"
-    priority                   = 110
-    direction                  = "Inbound"
-    access                     = "Allow"
-    protocol                   = "Tcp"
-    source_port_range          = "*"
-    destination_port_range     = "80"
-    source_address_prefix      = "*"
-    destination_address_prefix = "*"
-  }
-
-  # ── HTTPS ────────────────────────────────────────────────
-  security_rule {
-    name                       = "allow-https"
-    priority                   = 120
-    direction                  = "Inbound"
-    access                     = "Allow"
-    protocol                   = "Tcp"
-    source_port_range          = "*"
-    destination_port_range     = "443"
-    source_address_prefix      = "*"
-    destination_address_prefix = "*"
-  }
-
-  # ── JupyterLab ───────────────────────────────────────────
-  security_rule {
-    name                       = "allow-jupyter"
-    priority                   = 130
-    direction                  = "Inbound"
-    access                     = "Allow"
-    protocol                   = "Tcp"
-    source_port_range          = "*"
-    destination_port_range     = "8888"
-    source_address_prefix      = var.allowed_ssh_cidr
-    destination_address_prefix = "*"
-  }
-
-  # ── Grafana ──────────────────────────────────────────────
-  security_rule {
-    name                       = "allow-grafana"
-    priority                   = 140
-    direction                  = "Inbound"
-    access                     = "Allow"
-    protocol                   = "Tcp"
-    source_port_range          = "*"
-    destination_port_range     = "3000"
-    source_address_prefix      = var.allowed_ssh_cidr
-    destination_address_prefix = "*"
-  }
-
-  # ── Portainer (Docker UI) ───────────────────────────────
-  security_rule {
-    name                       = "allow-portainer"
-    priority                   = 150
-    direction                  = "Inbound"
-    access                     = "Allow"
-    protocol                   = "Tcp"
-    source_port_range          = "*"
-    destination_port_range     = "9443"
-    source_address_prefix      = var.allowed_ssh_cidr
-    destination_address_prefix = "*"
-  }
-
-  # ── Prometheus ───────────────────────────────────────────
-  security_rule {
-    name                       = "allow-prometheus"
-    priority                   = 160
-    direction                  = "Inbound"
-    access                     = "Allow"
-    protocol                   = "Tcp"
-    source_port_range          = "*"
-    destination_port_range     = "9090"
-    source_address_prefix      = var.allowed_ssh_cidr
-    destination_address_prefix = "*"
-  }
-
-  # ── Vault ────────────────────────────────────────────────
-  security_rule {
-    name                       = "allow-vault"
-    priority                   = 170
-    direction                  = "Inbound"
-    access                     = "Allow"
-    protocol                   = "Tcp"
-    source_port_range          = "*"
-    destination_port_range     = "8200"
-    source_address_prefix      = var.allowed_ssh_cidr
-    destination_address_prefix = "*"
-  }
-
-  # ── Deny ALL (dernière priorité) ─────────────────────────
-  security_rule {
-    name                       = "deny-all-inbound"
-    priority                   = 4096
-    direction                  = "Inbound"
-    access                     = "Deny"
-    protocol                   = "*"
-    source_port_range          = "*"
-    destination_port_range     = "*"
-    source_address_prefix      = "*"
-    destination_address_prefix = "*"
-  }
-}
-```
-
-**Explications clés** :
-- `azurerm_virtual_network` : crée l'espace d'adressage Azure (10.0.0.0/16)
-- `azurerm_subnet` : sous-réseau pour les VMs (10.0.1.0/24)
-- `azurerm_network_security_group` : pare-feu virtuel avec règles stateless
-- Priorités : 100 = SSH, 110 = HTTP, 120 = HTTPS, 130 = JupyterLab, etc.
-- **Clé** : SSH restreint à `allowed_ssh_cidr`, tous les outils sensibles aussi restreints
-- Priorité 4096 (Deny All) : défense en profondeur (explicite deny)
-
----
-
-###  outputs.tf - Valeurs de sortie (IPs, URLs, commandes SSH)
-
-**Rôle** : Affiche les informations essentielles après `terraform apply` (IPs, URLs des services, commandes de connexion).
-
-```hcl
-# =============================================================
-#  OUTPUTS
-# =============================================================
-
-output "vm_public_ip" {
-  description = "Adresse IP publique de la VM"
-  value       = azurerm_public_ip.pip.ip_address
-}
-
-output "vm_fqdn" {
-  description = "FQDN (DNS) de la VM"
-  value       = azurerm_public_ip.pip.fqdn
-}
-
-output "vm_private_ip" {
-  description = "Adresse IP privée de la VM"
-  value       = azurerm_network_interface.nic.private_ip_address
-}
-
-output "ssh_command" {
-  description = "Commande SSH prête à l'emploi"
-  value       = "ssh -i keys/${var.vm_name}_id_rsa ${var.admin_username}@${azurerm_public_ip.pip.ip_address}"
-}
-
-output "ssh_key_path" {
-  description = "Chemin vers la clé SSH privée"
-  value       = "${path.module}/keys/${var.vm_name}_id_rsa"
-  sensitive   = true
-}
-
-output "jupyter_url" {
-  description = "URL Jupyter Lab (après démarrage)"
-  value       = "http://${azurerm_public_ip.pip.ip_address}:8888"
-}
-
-output "grafana_url" {
-  description = "URL Grafana (admin/admin)"
-  value       = "http://${azurerm_public_ip.pip.ip_address}:3000"
-}
-
-output "portainer_url" {
-  description = "URL Portainer (Docker UI)"
-  value       = "https://${azurerm_public_ip.pip.ip_address}:9443"
-}
-
-output "resource_group_name" {
-  description = "Nom du Resource Group"
-  value       = azurerm_resource_group.rg.name
-}
-```
-
-**Explications clés** :
-- `terraform output` récupère ces valeurs après `terraform apply`
-- `ssh_command` : commande SSH complète à copier-coller
-- `sensitive = true` sur la clé SSH (masquée dans les logs)
-- Tous les URLs incluent l'IP publique (dynamique)
-
----
-
-## Déploiement en 5 étapes
+## Démarrage rapide
 
 ### 1. Connexion Azure
 
-Lancer le cloud Shell depuis le portal Azure et choisir PowerSehll.
+Lancer le cloud Shell depuis le portal Azure et choisir PowerShell.
 
 ### 2. Cloner et configurer
 
@@ -672,10 +221,17 @@ cd azure-devops-vm
 nano terraform.tfvars                          # Éditez selon vos besoins (optionnel)
 ```
 
+> **Choisir un profil** : `terraform.tfvars` déploie par défaut le profil
+> `"fullstack"` (tous les outils). Pour un profil ciblé, utilisez directement
+> un des fichiers de `examples/` — voir [Profils étudiants](#profils-étudiants-vm_profile) :
+> `terraform apply -var-file="examples/dataops.tfvars"` (étape 3 ci-dessous).
+
 ### 3. Déployer
 
 ```bash
 terraform init && terraform fmt && terraform validate && terraform plan && terraform apply -auto-approve
+# Ou, pour un profil ciblé :
+# terraform apply -auto-approve -var-file="examples/devops.tfvars"
 ```
 
 - La VM est créée en **~3 minutes**.
@@ -716,22 +272,32 @@ devops-status
 
 ### 5. Accéder aux services
 
-Une fois l'installation terminée, les services sont accessibles depuis votre IP (remplacer `<IP>` par l'IP publique de la VM) :
+**Le plus simple : ouvrez le tableau de bord** — `terraform output dashboard_url`
+(ou directement `http://<IP>/`). Il affiche le profil actif de la VM, un lien
+« Ouvrir » + « Copier le lien » pour chaque service réellement installé, et
+un indicateur d'état en direct (vert = joignable, rouge = injoignable),
+vérifié depuis votre navigateur sans rien envoyer à un tiers.
 
-| Service | URL | Credentials |
-|---|---|---|
-| JupyterLab | http://\<IP\>:8888 | Aucun (token désactivé) |
-| Grafana | http://\<IP\>:3000 | admin / admin |
-| Prometheus | http://\<IP\>:9090 | - |
-| Portainer | https://\<IP\>:9443 | Création au 1er accès |
-| Vault UI | http://\<IP\>:8200/ui | Root token dans `/root/.vault-init` |
-| Airflow | http://\<IP\>:8080 | admin / admin (démarrage manuel) |
+Sinon, les services sont accessibles directement (remplacer `<IP>` par l'IP publique de la VM) :
 
-> **Sécurité** : tous ces ports sont restreints à votre IP (`allowed_ssh_cidr`) via le NSG Azure. Vérifiez votre IP actuelle avec `curl ifconfig.me` avant de vous connecter depuis un autre réseau.
+| Service | URL | Credentials | Profil requis |
+|---|---|---|---|
+| JupyterLab | http://\<IP\>:8888 | Token généré par Terraform → `terraform output jupyter_token` (ou `jupyter_url` qui inclut déjà le token) | `dataops` / `fullstack` |
+| Grafana | http://\<IP\>:3000 | `admin` / mot de passe généré → `terraform output grafana_admin_password` | tous |
+| Prometheus | http://\<IP\>:9090 | - | tous |
+| Portainer | https://\<IP\>:9443 | `admin` / mot de passe généré → `terraform output portainer_admin_password` (compte déjà initialisé, aucune action requise) | tous |
+| Vault UI | http://\<IP\>:8200/ui | Root token dans `/root/.vault-init` sur la VM | `devops` / `fullstack` |
+
+> **Sécurité** : tous ces ports sont restreints par défaut à l'IP publique détectée automatiquement au moment du `terraform apply` (`allowed_ssh_cidr = "auto"`), à l'exception du tableau de bord (port 80) qui est volontairement public — il n'affiche que des liens, aucune information sensible. Si votre IP change ensuite, mettez à jour `terraform.tfvars` avec la nouvelle IP (ou ré-appliquez pour redétecter) puis relancez `terraform apply`.
 
 ---
 
 ## Logiciels installés automatiquement
+
+> La liste ci-dessous correspond au profil `fullstack` (tout installé). Avec
+> un profil ciblé (`devops`/`dataops`/`cybersecurity`), seuls le socle commun
+> et les outils de ce profil sont installés — voir le tableau de la section
+> [Profils étudiants](#profils-étudiants-vm_profile).
 
 ### Containers et Orchestration
 
@@ -772,23 +338,21 @@ Une fois l'installation terminée, les services sont accessibles depuis votre IP
 | Outil | Accès | Description |
 |---|---|---|
 | Prometheus | http://\<IP\>:9090 | Collecte et stockage de métriques time-series |
-| Grafana | http://\<IP\>:3000 (admin/admin) | Dashboards de visualisation - préconfigurés avec Node Exporter |
+| Grafana | http://\<IP\>:3000 (admin / mot de passe généré, cf. `terraform output grafana_admin_password`) | Dashboards de visualisation - préconfigurés avec Node Exporter |
 | Node Exporter | Port 9100 (interne VNet) | Métriques système CPU, RAM, disque, réseau |
 
 ### Bases de données
 
-Clients en ligne de commande : `postgresql-client`, `mysql-client`, `redis-tools`, `sqlite3`, `usql` (client universel multi-BDD).
+Clients en ligne de commande : `postgresql-client`, `redis-tools`, `sqlite3`, `usql` (client universel multi-BDD).
 
 Conteneurs Docker démarrés automatiquement avec données persistées dans `/data/docker-volumes/` :
 
 | Service | Port (loopback) | Credentials | Image |
 |---|---|---|---|
 | PostgreSQL 16 | 127.0.0.1:5432 | postgres / postgres | postgres:16-alpine |
-| MySQL 8 | 127.0.0.1:3306 | root / root | mysql:8 |
 | Redis 7 | 127.0.0.1:6379 | - | redis:7-alpine |
-| MongoDB 7 | 127.0.0.1:27017 | admin / admin | mongo:7 |
 
-> Les conteneurs écoutent sur `127.0.0.1` uniquement pour éviter toute exposition publique, même si le NSG Azure filtre déjà au niveau réseau.
+> Les conteneurs écoutent sur `127.0.0.1` uniquement pour éviter toute exposition publique, même si le NSG Azure filtre déjà au niveau réseau. MySQL et MongoDB ne sont volontairement pas déployés dans cette version (retirés du script d'installation) ; ajoutez-les vous-même dans `cloud-init/install.sh` si vous en avez besoin.
 
 ### Python et DataOps
 
@@ -796,12 +360,12 @@ Conteneurs Docker démarrés automatiquement avec données persistées dans `/da
 |---|---|
 | Data Science | pandas, polars, numpy, matplotlib, seaborn, plotly |
 | Machine Learning | scikit-learn, xgboost, mlflow |
-| Pipelines | dbt-core, Apache Airflow 2.9, PySpark, Dask |
+| Pipelines | dbt-core, PySpark, Dask |
 | API | FastAPI, uvicorn, requests, httpx, aiohttp |
-| Bases de données | SQLAlchemy, psycopg2, pymysql, pymongo, redis |
+| Bases de données | SQLAlchemy, psycopg2, redis |
 | Cloud | azure-storage-blob, azure-identity, boto3 |
 | Qualité | black, flake8, mypy, isort, pylint, pytest, pre-commit |
-| Notebooks | JupyterLab - http://\<IP\>:8888 |
+| Notebooks | JupyterLab - http://\<IP\>:8888 (token requis, cf. `terraform output jupyter_token`) |
 
 ### Sécurité - DevSecOps
 
@@ -869,38 +433,38 @@ Répertoire de travail dédié : `/data/pentest/{recon,exploits,reports,loot}`
 
 ---
 
-## Sécurité et NSG
+## Sécurité et réseau
 
-> **Recommandation** : restreignez l'accès SSH à votre IP uniquement.
+> L'accès SSH et les outils sensibles sont restreints **automatiquement** à
+> l'IP publique du déployeur (`allowed_ssh_cidr = "auto"`, valeur par
+> défaut) — aucune manipulation requise. Voir `terraform output
+> allowed_ssh_cidr_effective` pour vérifier la valeur retenue.
 
-```bash
-# Trouver votre IP publique
-curl ifconfig.me
-```
+Récapitulatif des règles NSG définies dans `network.tf` (le port ouvert
+dépend parfois du profil `vm_profile` choisi) :
 
-Dans `terraform.tfvars` :
+| Priorité | Port(s) | Service | Source autorisée | Profil requis |
+|---|---|---|---|---|
+| 100 | 22 | SSH | `allowed_ssh_cidr` (auto-détecté) | tous |
+| 110 | 80 | HTTP — tableau de bord de statut | Tout (`*`) — volontairement public, ne montre que des liens | tous |
+| 120 | 443 | HTTPS (réservé) | Tout (`*`) | tous |
+| 130 | 8888 | JupyterLab | `allowed_ssh_cidr` | `dataops` / `fullstack` |
+| 140 | 3000 | Grafana | `allowed_ssh_cidr` | tous |
+| 150 | 9443 | Portainer | `allowed_ssh_cidr` | tous |
+| 160 | 9090 | Prometheus | `allowed_ssh_cidr` | tous |
+| 170 | 8200 | Vault | `allowed_ssh_cidr` | `devops` / `fullstack` |
+| 180 | 9100 | Node Exporter | CIDR VNet interne uniquement | tous |
+| 190 | 5432, 6379 | PostgreSQL, Redis | CIDR VNet interne uniquement | tous |
+| 4096 | `*` | Deny all | - | - |
 
-```hcl
-allowed_ssh_cidr = "90.12.34.56/32"
-```
+> Le pare-feu UFW dans la VM est aligné sur ces mêmes règles (défense en profondeur) et s'adapte lui aussi au profil actif.
 
-Récapitulatif des règles NSG définies dans `network.tf` :
+**Autres protections en place** :
 
-| Priorité | Port(s) | Service | Source autorisée |
-|---|---|---|---|
-| 100 | 22 | SSH | `allowed_ssh_cidr` uniquement |
-| 110 | 80 | HTTP | Tout (`*`) |
-| 120 | 443 | HTTPS | Tout (`*`) |
-| 130 | 8888 | JupyterLab | `allowed_ssh_cidr` uniquement |
-| 140 | 3000 | Grafana | `allowed_ssh_cidr` uniquement |
-| 150 | 9443 | Portainer | `allowed_ssh_cidr` uniquement |
-| 160 | 9090 | Prometheus | `allowed_ssh_cidr` uniquement |
-| 170 | 8200 | Vault | `allowed_ssh_cidr` uniquement |
-| 180 | 9100 | Node Exporter | CIDR VNet interne uniquement |
-| 190 | 5432, 3306, 6379, 27017 | Bases de données | CIDR VNet interne uniquement |
-| 4096 | `*` | Deny all | - |
-
-> Le pare-feu UFW dans la VM est aligné sur ces mêmes règles (défense en profondeur).
+- **fail2ban** : bannissement automatique après 5 tentatives SSH infructueuses.
+- **Identifiants générés** : Grafana, Jupyter et Portainer n'utilisent jamais de mot de passe par défaut — tous générés aléatoirement par Terraform (`random_password`), récupérables via `terraform output` (marqués `sensitive`).
+- **Clé SSH** : générée par Terraform (`tls_private_key`), jamais transmise en clair ; le dossier `keys/` est exclu de git par `.gitignore`.
+- **Vault** : initialisé et scellé (unseal) automatiquement au premier démarrage ; root token dans `/root/.vault-init` (permissions 750).
 
 ---
 
@@ -916,7 +480,7 @@ Récapitulatif des règles NSG définies dans `network.tf` :
 
 > Prix indicatifs région West Europe. **Éteignez la VM lorsqu'elle n'est pas utilisée** pour économiser votre crédit : `az vm deallocate -g rg-devops-pro-vm -n devops-pro-vm`
 
-**Optimisation** : passer à `Standard_B1ms` (1 vCPU / 2 GB) réduit le coût à ~18$/mois si vous n'utilisez pas les outils gourmands en mémoire (Airflow, PySpark, Metasploit).
+**Optimisation** : passer à `Standard_B1ms` (1 vCPU / 2 GB) réduit le coût à ~18$/mois si vous n'utilisez pas les outils gourmands en mémoire (PySpark, Metasploit).
 
 ---
 
@@ -924,25 +488,26 @@ Récapitulatif des règles NSG définies dans `network.tf` :
 
 **Fichier** : `cloud-init/install.sh`
 
-**Rôle** : Script d'initialisation automatique exécuté au démarrage de la VM via `cloud-init` (user data Terraform). Il installe et configure tous les logiciels en 12 phases logiques.
+**Rôle** : Script d'initialisation automatique exécuté au démarrage de la VM via `cloud-init` (user data Terraform). Il installe et configure tous les logiciels en 13 phases logiques (0 à 12, plus une phase 10b dédiée au pentest). Chaque outil est installé de façon indépendante : si l'un d'eux échoue (ex : indisponibilité temporaire d'une API tierce), les autres phases s'exécutent quand même et l'installation va jusqu'au bout.
 
 ###  Phases d'installation
 
 | Phase | Durée | Description |
 |---|---|---|
-| **[0/12]** | ~3 min | Mise à jour système, dépendances base, `eza`, `yq` |
-| **[1/12]** | ~2 min | Montage et formatage du disque de données (`/data`) |
+| **[0/12]** | ~3 min | Mise à jour système, dépendances de base |
+| **[1/12]** | ~1 min | Détection et montage du disque de données (`/data`) |
 | **[2/12]** | ~2 min | ZSH + Oh My Zsh + plugins + configuration `.zshrc` |
-| **[3/12]** | ~3 min | Docker CE + daemon config + Portainer UI (9443) |
+| **[3/12]** | ~3 min | Docker CE + daemon config + Portainer UI (9443, admin initialisé automatiquement) |
 | **[4/12]** | ~2 min | kubectl, Helm, k9s, kubectx, kind |
 | **[5/12]** | ~3 min | Terraform, Terragrunt, Packer, Ansible, tflint |
 | **[6/12]** | ~3 min | Azure CLI, GitHub CLI, ArgoCD, act, Vault (8200), Skaffold, Stern, cosign |
-| **[7/12]** | ~2 min | Prometheus (9090), Grafana (3000), Node Exporter (9100) |
-| **[8/12]** | ~3 min | Python 3, Jupyter Lab (8888), libs data science/ML |
-| **[9/12]** | ~2 min | Bases de données Docker : PostgreSQL, MySQL, Redis, MongoDB |
-| **[10/12]** | ~2 min | Go, Node.js LTS, Rust, Java 21 |
-| **[11/12]** | ~2 min | Pentest tools : Nuclei, ffuf, gobuster, Amass, theHarvester, Metasploit, Hydra, sqlmap, John, etc. |
-| **[12/12]** | ~2 min | Nettoyage, permissions finales, messages de statut |
+| **[7/12]** | ~2 min | Prometheus (9090), Grafana (3000, mot de passe généré), Node Exporter (9100) |
+| **[8/12]** | ~3 min | Python 3, Jupyter Lab (8888, token généré), libs data science/ML |
+| **[9/12]** | ~2 min | Clients DB (`usql`) + conteneurs Docker : PostgreSQL, Redis |
+| **[10/12]** | ~2 min | Outils réseau (masscan, tshark…), Trivy, Hadolint, UFW, fail2ban |
+| **[10b/12]** | ~2 min | Pentest : Nuclei, ffuf, gobuster, Amass, theHarvester, Metasploit, Hydra, sqlmap, John, etc. |
+| **[11/12]** | ~2 min | Go, Node.js LTS, Rust, Java 21 |
+| **[12/12]** | ~2 min | Nettoyage, permissions finales, tableau de bord de statut (nginx, port 80), messages de statut |
 
 ###  Sécurité du script
 
@@ -950,28 +515,32 @@ Récapitulatif des règles NSG définies dans `network.tf` :
 - **ufw** : Pare-feu applicatif configuré (aligné sur NSG Azure)
 - **Vault** : Initialisé automatiquement, root token dans `/root/.vault-init` (750)
 - **Docker** : groupe `docker` ajouté à `devopsadmin` (accès sans sudo)
-- **Mots de passe par défaut** : Grafana (admin/admin), Vault (root token), tous changeable
+- **Identifiants** : Grafana, Jupyter et Portainer utilisent tous des identifiants **générés aléatoirement par Terraform** (plus de mot de passe par défaut) — récupérables via `terraform output`. Vault utilise son root token généré à l'initialisation.
 
-###  Exemple de trace d'exécution
+###  Exemple de trace d'exécution (profil `dataops`)
 
 ```log
 ==============================================================
   DevOps Pro VM — Installation démarrée
-  Fri Dec 13 10:15:23 UTC 2024
+  Fri Sep 26 22:10:03 UTC 2026
 ==============================================================
    [0/12] Système mis à jour
-   eza installé
-   yq installé
-   [0/12] Système mis à jour
-   [1/12] Disque /dev/sdc monté sur /data
    [1/12] Disque données configuré → /data
    [2/12] ZSH configuré
    [3/12] Docker + Portainer installés
-   Portainer démarré sur :9443
-   ✓ kubectl 1.29.0 installé
-   ✓ Helm 3.13.2 installé
-   ✓ Terraform 1.7.0 installé
-   ... (suite)
+   Compte admin Portainer initialisé (admin / mot de passe généré par Terraform)
+  ⏭  Phase ignorée (profil "dataops" ne nécessite pas : Kubernetes (profil devops uniquement))
+  ⏭  Phase ignorée (profil "dataops" ne nécessite pas : Infrastructure as Code (profil devops uniquement))
+  ⏭  Phase ignorée (profil "dataops" ne nécessite pas : CI/CD Tools (profil devops uniquement))
+   [7/12] Prometheus (9090) + Grafana (3000) + Node Exporter (9100) installés
+   [8/12] Python DataOps stack installé
+   [9/12] Clients DB + conteneurs Docker démarrés
+   UFW configuré
+   fail2ban configuré et démarré
+  ⏭  Phase ignorée (profil "dataops" ne nécessite pas : Pentest offensif (profil cybersecurity uniquement))
+   [11/12] Go / Node.js / Rust / Java installés
+   Landing page de statut disponible sur http://<IP>/
+  ✅ Installation complète terminée !
 ```
 
 ###  Personnalisation du script
@@ -1010,9 +579,6 @@ tail -f /var/log/devops-install.log
 sudo systemctl start jupyter
 sudo systemctl status jupyter
 
-# Démarrer Airflow
-sudo systemctl start airflow-webserver airflow-scheduler
-
 # Démarrer / vérifier Vault
 sudo systemctl status vault
 cat /root/.vault-init   # root token et unseal key (sudo requis)
@@ -1032,7 +598,7 @@ az vm start -g rg-devops-pro-vm -n devops-pro-vm
 
 ---
 
-## Troubleshooting
+## Dépannage
 
 ### L'installation est toujours en cours après 30 minutes
 
@@ -1068,9 +634,11 @@ ss -tulnp | grep 8888
 # Vérifier le pare-feu UFW
 sudo ufw status
 
-# Vérifier votre IP actuelle (peut avoir changé)
+# Vérifier votre IP actuelle (peut avoir changé depuis le déploiement)
 curl ifconfig.me
-# Si différente de allowed_ssh_cidr → mettre à jour terraform.tfvars et ré-appliquer
+# Comparer avec : terraform output allowed_ssh_cidr_effective
+# Si différente → terraform apply à nouveau (allowed_ssh_cidr="auto" redétecte
+# automatiquement), ou fixez une valeur explicite dans terraform.tfvars.
 ```
 
 ### Vault non initialisé après redémarrage
@@ -1092,7 +660,7 @@ sudo systemctl status docker
 docker ps -a
 
 # Relancer un conteneur
-docker start postgres mysql redis mongo
+docker start postgres redis
 
 # Voir les logs d'un conteneur
 docker logs postgres --tail 50
@@ -1108,7 +676,7 @@ terraform init -reconfigure
 
 ---
 
-## Mise à jour de la VM
+## Maintenance de la VM
 
 ### Mettre à jour les paquets système
 
@@ -1175,10 +743,28 @@ Les contributions sont bienvenues. Pour proposer une amélioration :
 Dans `install.sh`, respectez le pattern existant :
 
 ```bash
-TOOL_VER=$(curl -s "https://api.github.com/repos/<org>/<repo>/releases/latest" | jq -r .tag_name)
-curl -sLo /usr/local/bin/tool "https://.../$TOOL_VER/tool-linux-amd64"
-chmod +x /usr/local/bin/tool
-ok "Tool $TOOL_VER installé"
+TOOL_VER=$(gh_latest <org>/<repo>)
+if [ -n "$TOOL_VER" ]; then
+  curl -sLo /usr/local/bin/tool "https://.../$TOOL_VER/tool-linux-amd64" \
+    && chmod +x /usr/local/bin/tool \
+    && ok "Tool $TOOL_VER installé" || err "Tool non installé"
+else
+  err "Tool non installé (version introuvable)"
+fi
 ```
 
-N'oubliez pas de l'ajouter dans `devops-status` et dans les tableaux du README.
+Si l'outil ne concerne qu'un profil précis, encadrez le bloc avec `if
+should_run "devops"; then ... else skip_msg "..."; fi` (voir les phases 4, 5,
+6, 8, 10b et 11 du script pour des exemples). `gh_latest` gère déjà les
+retries en cas de rate-limit de l'API GitHub — préférez-le à un appel `curl`
+direct vers `api.github.com`.
+
+N'oubliez pas de l'ajouter dans `devops-status`, dans le tableau de bord
+(`SERVICES` dans la phase 12), et dans les tableaux du README.
+
+---
+
+## Auteur
+
+**Pape Lo** — [pape.lo@estiam.com](mailto:pape.lo@estiam.com)
+

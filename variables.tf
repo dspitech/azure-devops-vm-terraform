@@ -88,12 +88,43 @@ variable "dns_servers" {
   default     = ["8.8.8.8", "1.1.1.1"]
 }
 
-variable "allowed_ssh_cidr" {
+variable "vm_profile" {
   description = <<EOT
-CIDR autorisé pour SSH et outils (Jupyter, Grafana…).
-Par défaut ouvert - RESTREINDRE à votre IP en production :
-  ex: "90.12.34.56/32"
+Profil de la VM — détermine quels outils cloud-init installe, adapté au
+parcours de l'étudiant. Le socle commun (Docker, monitoring, sécurité de
+base, PostgreSQL/Redis) est toujours installé quel que soit le profil.
+  - "devops"        : Kubernetes, Terraform/Ansible/Packer, CI/CD (ArgoCD,
+                       Vault, Skaffold...), scan sécurité conteneurs (Trivy,
+                       Hadolint), langages (Go/Node/Rust/Java)
+  - "dataops"        : JupyterLab, stack Python data science/ML, langages
+  - "cybersecurity"  : outils réseau, pentest offensif (Nuclei, Metasploit,
+                       ffuf, gobuster, Amass, theHarvester, sqlmap...)
+  - "fullstack" (défaut) : tout ce qui précède réuni (comportement historique)
 EOT
   type    = string
-  default = "*"
+  default = "fullstack"
+
+  validation {
+    condition     = contains(["devops", "dataops", "cybersecurity", "fullstack"], var.vm_profile)
+    error_message = "vm_profile doit être l'un de : \"devops\", \"dataops\", \"cybersecurity\", \"fullstack\"."
+  }
+}
+
+variable "allowed_ssh_cidr" {
+  description = <<EOT
+CIDR autorisé pour SSH et les outils sensibles (Jupyter, Grafana, Portainer,
+Prometheus, Vault).
+  - "auto" (défaut) : Terraform détecte automatiquement l'IP publique de la
+    machine qui exécute `terraform apply` et restreint l'accès à cette IP/32.
+    Aucune étape manuelle requise.
+  - une IP/CIDR explicite, ex: "90.12.34.56/32"
+  - "*" pour ouvrir à tout Internet (déconseillé, uniquement pour du dépannage)
+EOT
+  type    = string
+  default = "auto"
+
+  validation {
+    condition     = var.allowed_ssh_cidr == "auto" || var.allowed_ssh_cidr == "*" || can(cidrhost(var.allowed_ssh_cidr, 0))
+    error_message = "allowed_ssh_cidr doit être \"auto\", \"*\", ou un CIDR valide (ex: \"90.12.34.56/32\")."
+  }
 }

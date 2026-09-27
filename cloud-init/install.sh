@@ -5,18 +5,50 @@
 #  Ubuntu 22.04 LTS
 # =============================================================
 
-set -euo pipefail
+# NOTE: pas de "set -e" ici, volontairement. Ce script installe ~40 outils
+# indépendants ; si l'un d'eux échoue (rate-limit GitHub, mirroir Ubuntu
+# temporairement indisponible, etc.) le script DOIT continuer pour que les
+# 39 autres soient installés et que l'installation se termine à 100%.
+# Chaque étape gère déjà explicitement son échec via `|| err "..."`.
+set -uo pipefail
 LOG="/var/log/devops-install.log"
 exec > >(tee -a "$LOG") 2>&1
+
+# Si une commande non protégée par || plante quand même, on log et on
+# continue au lieu de laisser un "set -e" implicite tuer tout le script.
+trap 'err "Commande inattendue en échec (ligne $LINENO) — poursuite"' ERR
 
 echo "=============================================="
 echo "  DevOps Pro VM — Installation démarrée"
 echo "  $(date)"
 echo "=============================================="
 
-ADMIN_USER="devopsadmin"
+# ── Valeurs injectées par Terraform (voir main.tf: cloud_init_header) ──
+# Les valeurs par défaut ci-dessous ne servent que si ce script est
+# relancé/testé manuellement en dehors de Terraform.
+ADMIN_USER="${ADMIN_USER:-devopsadmin}"
+GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD:-admin}"
+JUPYTER_TOKEN="${JUPYTER_TOKEN:-}"
+PORTAINER_ADMIN_PASSWORD="${PORTAINER_ADMIN_PASSWORD:-ChangeMe123456}"
+DATA_DISK_LUN="${DATA_DISK_LUN:-10}"
+VM_PROFILE="${VM_PROFILE:-fullstack}"
+
+# ── Profils ──────────────────────────────────────────────────
+# "base"     : socle toujours installé, quel que soit le profil.
+# "devops"   : Kubernetes, IaC, CI/CD, scan sécurité conteneurs.
+# "dataops"  : Python / Jupyter / data science, bases de données.
+# "cybersecurity" : outils réseau + pentest offensif.
+# "fullstack" (défaut) : tout ce qui précède — comportement historique.
+should_run() {
+  local tag="$1"
+  [ "$tag" = "base" ] && return 0
+  [ "$VM_PROFILE" = "fullstack" ] && return 0
+  [ "$VM_PROFILE" = "$tag" ] && return 0
+  return 1
+}
+skip_msg() { echo "  ⏭  Phase ignorée (profil \"$VM_PROFILE\" ne nécessite pas : $1)"; }
+
 HOME_DIR="/home/$ADMIN_USER"
-DATA_DISK="/dev/sdc"
 DATA_MOUNT="/data"
 
 ok()  { echo "   $1"; }
@@ -29,6 +61,21 @@ pip_install() {
   else
     pip3 install --quiet "$@" 2>/dev/null || err "pip_install échoué: $*"
   fi
+}
+
+# Récupère le tag de la dernière release GitHub d'un dépôt, avec retries
+# et repli propre si l'API est rate-limitée (au lieu de lancer un
+# téléchargement vers une URL contenant ".../download/null/...").
+# Usage: VER=$(gh_latest owner/repo) ; [ -n "$VER" ] || { err "..."; continue-ish }
+gh_latest() {
+  local repo="$1" tag="" attempt
+  for attempt in 1 2 3; do
+    tag=$(curl -fsSL --max-time 15 "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null \
+      | jq -r '.tag_name // empty' 2>/dev/null || true)
+    [ -n "$tag" ] && [ "$tag" != "null" ] && break
+    sleep $((attempt * 3))
+  done
+  echo "$tag"
 }
 
 # ==============================================================
@@ -86,13 +133,40 @@ ok "[0/12] Système mis à jour"
 # ==============================================================
 echo "[1/12] Configuration du disque de données..."
 
-for i in $(seq 1 6); do
-  [ -b "$DATA_DISK" ] && break
-  echo "  Attente du disque $DATA_DISK... ($i/6)"
+# Le disque de données est identifié par son LUN Azure (lien udev stable
+# /dev/disk/azure/scsi1/lunN), plutôt que par une lettre "/dev/sdX" qui
+# peut varier selon la génération de VM / le nombre de disques attachés.
+AZURE_LUN_LINK="/dev/disk/azure/scsi1/lun${DATA_DISK_LUN}"
+DATA_DISK=""
+
+for i in $(seq 1 12); do
+  if [ -e "$AZURE_LUN_LINK" ]; then
+    DATA_DISK="$(readlink -f "$AZURE_LUN_LINK")"
+    break
+  fi
+  echo "  Attente du disque de données (LUN $DATA_DISK_LUN)... ($i/12)"
   sleep 5
 done
 
-if [ -b "$DATA_DISK" ]; then
+# Repli : si le lien udev par LUN n'existe pas (image/génération plus
+# ancienne), on cherche le premier disque non partitionné et sans
+# système de fichiers, en excluant le disque OS (celui qui contient /).
+if [ -z "$DATA_DISK" ]; then
+  err "Lien $AZURE_LUN_LINK introuvable, recherche du disque de données par heuristique"
+  os_disk="$(lsblk -no PKNAME "$(findmnt -no SOURCE /)" 2>/dev/null || true)"
+  for dev in $(lsblk -dpno NAME,TYPE | awk '$2=="disk"{print $1}'); do
+    devname="$(basename "$dev")"
+    [ "$devname" = "$os_disk" ] && continue
+    fstype="$(lsblk -no FSTYPE "$dev" 2>/dev/null | head -1)"
+    children="$(lsblk -no NAME "$dev" 2>/dev/null | wc -l)"
+    if [ -z "$fstype" ] && [ "$children" -le 1 ]; then
+      DATA_DISK="$dev"
+      break
+    fi
+  done
+fi
+
+if [ -n "$DATA_DISK" ] && [ -b "$DATA_DISK" ]; then
   if ! blkid "$DATA_DISK" | grep -q ext4; then
     mkfs.ext4 -L datadisk "$DATA_DISK"
   fi
@@ -103,7 +177,7 @@ if [ -b "$DATA_DISK" ]; then
   mount -a || true
   ok "Disque $DATA_DISK monté sur $DATA_MOUNT"
 else
-  err "Disque $DATA_DISK non trouvé, on continue sans"
+  err "Aucun disque de données trouvé, on continue sans (les données iront sur le disque OS)"
   mkdir -p "$DATA_MOUNT"
 fi
 
@@ -246,66 +320,119 @@ docker run -d \
   -v portainer_data:/data \
   portainer/portainer-ce:latest && ok "Portainer démarré sur :9443" || err "Portainer non démarré"
 
+# ── Initialisation automatique du compte admin Portainer ────
+# Sans cela, le premier visiteur de https://<IP>:9443 dans les 5
+# minutes suivant le démarrage devient admin — on le fait nous-mêmes
+# via l'API pour que le mot de passe généré par Terraform soit le seul
+# valide dès le départ (0 étape manuelle).
+PORTAINER_READY=false
+for i in $(seq 1 15); do
+  if curl -sk --max-time 5 "https://127.0.0.1:9443/api/status" >/dev/null 2>&1; then
+    PORTAINER_READY=true
+    break
+  fi
+  sleep 4
+done
+
+if [ "$PORTAINER_READY" = true ]; then
+  curl -sk --max-time 10 -X POST "https://127.0.0.1:9443/api/users/admin/init" \
+    -H "Content-Type: application/json" \
+    -d "{\"Username\":\"admin\",\"Password\":\"${PORTAINER_ADMIN_PASSWORD}\"}" \
+    >/dev/null 2>&1 \
+    && ok "Compte admin Portainer initialisé (admin / mot de passe généré par Terraform)" \
+    || err "Initialisation admin Portainer échouée (déjà initialisé ou API indisponible)"
+else
+  err "Portainer non prêt après 60s — initialisez le compte admin manuellement"
+fi
+
 ok "[3/12] Docker + Portainer installés"
 
 # ==============================================================
 # 4. KUBERNETES TOOLS
 # ==============================================================
+if should_run "devops"; then
 echo "[4/12] Outils Kubernetes..."
 
-KUBECTL_VER=$(curl -sL https://dl.k8s.io/release/stable.txt)
-curl -sLO "https://dl.k8s.io/release/$KUBECTL_VER/bin/linux/amd64/kubectl"
-install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-rm -f kubectl
-ok "kubectl $KUBECTL_VER installé"
+KUBECTL_VER=$(curl -sL --max-time 15 https://dl.k8s.io/release/stable.txt || true)
+if [ -n "$KUBECTL_VER" ]; then
+  curl -sLO "https://dl.k8s.io/release/$KUBECTL_VER/bin/linux/amd64/kubectl" \
+    && install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl \
+    && ok "kubectl $KUBECTL_VER installé" || err "kubectl non installé"
+  rm -f kubectl
+else
+  err "kubectl non installé (dl.k8s.io injoignable)"
+fi
 
 curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash \
   && ok "helm installé" || err "helm non installé"
 
-K9S_VER=$(curl -s "https://api.github.com/repos/derailed/k9s/releases/latest" | jq -r .tag_name)
-curl -sLO "https://github.com/derailed/k9s/releases/download/$K9S_VER/k9s_Linux_amd64.tar.gz"
-tar xzf k9s_Linux_amd64.tar.gz k9s
-install k9s /usr/local/bin/
-rm -f k9s k9s_Linux_amd64.tar.gz
-ok "k9s $K9S_VER installé"
+K9S_VER=$(gh_latest derailed/k9s)
+if [ -n "$K9S_VER" ]; then
+  curl -sLO "https://github.com/derailed/k9s/releases/download/$K9S_VER/k9s_Linux_amd64.tar.gz" \
+    && tar xzf k9s_Linux_amd64.tar.gz k9s \
+    && install k9s /usr/local/bin/ \
+    && ok "k9s $K9S_VER installé" || err "k9s téléchargement/installation échoué"
+  rm -f k9s k9s_Linux_amd64.tar.gz
+else
+  err "k9s non installé (version introuvable, API GitHub indisponible ?)"
+fi
 
 git clone --depth=1 https://github.com/ahmetb/kubectx /opt/kubectx 2>/dev/null || true
 ln -sf /opt/kubectx/kubectx /usr/local/bin/kubectx
 ln -sf /opt/kubectx/kubens  /usr/local/bin/kubens
 ok "kubectx/kubens installés"
 
-KIND_VER=$(curl -s "https://api.github.com/repos/kubernetes-sigs/kind/releases/latest" | jq -r .tag_name)
-curl -sLo /usr/local/bin/kind \
-  "https://kind.sigs.k8s.io/dl/$KIND_VER/kind-linux-amd64"
-chmod +x /usr/local/bin/kind
-ok "kind $KIND_VER installé"
+KIND_VER=$(gh_latest kubernetes-sigs/kind)
+if [ -n "$KIND_VER" ]; then
+  curl -sLo /usr/local/bin/kind "https://kind.sigs.k8s.io/dl/$KIND_VER/kind-linux-amd64" \
+    && chmod +x /usr/local/bin/kind \
+    && ok "kind $KIND_VER installé" || err "kind non installé"
+else
+  err "kind non installé (version introuvable)"
+fi
 
 ok "[4/12] kubectl / Helm / k9s / kind installés"
+else
+  skip_msg "Kubernetes (profil devops uniquement)"
+fi
 
 # ==============================================================
 # 5. INFRASTRUCTURE AS CODE
 # ==============================================================
+if should_run "devops"; then
 echo "[5/12] Infrastructure as Code..."
 
-TF_VER=$(curl -s "https://checkpoint-api.hashicorp.com/v1/check/terraform" | jq -r .current_version)
-curl -sLO "https://releases.hashicorp.com/terraform/$TF_VER/terraform_${TF_VER}_linux_amd64.zip"
-unzip -oq "terraform_${TF_VER}_linux_amd64.zip"
-install terraform /usr/local/bin/
-rm -f terraform terraform_*.zip
-ok "Terraform $TF_VER installé"
+TF_VER=$(curl -s --max-time 15 "https://checkpoint-api.hashicorp.com/v1/check/terraform" | jq -r '.current_version // empty' 2>/dev/null || true)
+if [ -n "$TF_VER" ]; then
+  curl -sLO "https://releases.hashicorp.com/terraform/$TF_VER/terraform_${TF_VER}_linux_amd64.zip" \
+    && unzip -oq "terraform_${TF_VER}_linux_amd64.zip" \
+    && install terraform /usr/local/bin/ \
+    && ok "Terraform $TF_VER installé" || err "Terraform non installé"
+  rm -f terraform terraform_*.zip
+else
+  err "Terraform non installé (checkpoint-api indisponible)"
+fi
 
-TG_VER=$(curl -s "https://api.github.com/repos/gruntwork-io/terragrunt/releases/latest" | jq -r .tag_name)
-curl -sLo /usr/local/bin/terragrunt \
-  "https://github.com/gruntwork-io/terragrunt/releases/download/$TG_VER/terragrunt_linux_amd64"
-chmod +x /usr/local/bin/terragrunt
-ok "Terragrunt $TG_VER installé"
+TG_VER=$(gh_latest gruntwork-io/terragrunt)
+if [ -n "$TG_VER" ]; then
+  curl -sLo /usr/local/bin/terragrunt \
+    "https://github.com/gruntwork-io/terragrunt/releases/download/$TG_VER/terragrunt_linux_amd64" \
+    && chmod +x /usr/local/bin/terragrunt \
+    && ok "Terragrunt $TG_VER installé" || err "Terragrunt non installé"
+else
+  err "Terragrunt non installé (version introuvable)"
+fi
 
-PKR_VER=$(curl -s "https://checkpoint-api.hashicorp.com/v1/check/packer" | jq -r .current_version)
-curl -sLO "https://releases.hashicorp.com/packer/$PKR_VER/packer_${PKR_VER}_linux_amd64.zip"
-unzip -oq "packer_${PKR_VER}_linux_amd64.zip"
-install packer /usr/local/bin/
-rm -f packer packer_*.zip
-ok "Packer $PKR_VER installé"
+PKR_VER=$(curl -s --max-time 15 "https://checkpoint-api.hashicorp.com/v1/check/packer" | jq -r '.current_version // empty' 2>/dev/null || true)
+if [ -n "$PKR_VER" ]; then
+  curl -sLO "https://releases.hashicorp.com/packer/$PKR_VER/packer_${PKR_VER}_linux_amd64.zip" \
+    && unzip -oq "packer_${PKR_VER}_linux_amd64.zip" \
+    && install packer /usr/local/bin/ \
+    && ok "Packer $PKR_VER installé" || err "Packer non installé"
+  rm -f packer packer_*.zip
+else
+  err "Packer non installé (checkpoint-api indisponible)"
+fi
 
 pip_install ansible ansible-lint molecule && ok "Ansible installé" || err "Ansible non installé"
 
@@ -313,10 +440,14 @@ curl -s https://raw.githubusercontent.com/terraform-linters/tflint/master/instal
   && ok "tflint installé" || err "tflint non installé"
 
 ok "[5/12] Terraform / Terragrunt / Ansible / Packer installés"
+else
+  skip_msg "Infrastructure as Code (profil devops uniquement)"
+fi
 
 # ==============================================================
 # 6. CI/CD — Azure CLI, GitHub CLI, ArgoCD, act, Vault, Skaffold, Stern, cosign
 # ==============================================================
+if should_run "devops"; then
 echo "[6/12] CI/CD Tools..."
 
 curl -sL https://aka.ms/InstallAzureCLIDeb | bash \
@@ -330,17 +461,24 @@ echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githu
 apt-get update -qq
 apt-get install -y gh && ok "GitHub CLI installé" || err "GitHub CLI non installé"
 
-ARGOCD_VER=$(curl -s "https://api.github.com/repos/argoproj/argo-cd/releases/latest" | jq -r .tag_name)
-curl -sLo /usr/local/bin/argocd \
-  "https://github.com/argoproj/argo-cd/releases/download/$ARGOCD_VER/argocd-linux-amd64"
-chmod +x /usr/local/bin/argocd
-ok "ArgoCD CLI $ARGOCD_VER installé"
+ARGOCD_VER=$(gh_latest argoproj/argo-cd)
+if [ -n "$ARGOCD_VER" ]; then
+  curl -sLo /usr/local/bin/argocd \
+    "https://github.com/argoproj/argo-cd/releases/download/$ARGOCD_VER/argocd-linux-amd64" \
+    && chmod +x /usr/local/bin/argocd \
+    && ok "ArgoCD CLI $ARGOCD_VER installé" || err "ArgoCD CLI non installé"
+else
+  err "ArgoCD CLI non installé (version introuvable)"
+fi
 
 curl -fsSL https://raw.githubusercontent.com/nektos/act/master/install.sh | bash \
   && ok "act installé" || err "act non installé"
 
 # ── Vault — service systemd persisté ────────────────────────
-VAULT_VER=$(curl -s "https://checkpoint-api.hashicorp.com/v1/check/vault" | jq -r .current_version)
+VAULT_VER=$(curl -s --max-time 15 "https://checkpoint-api.hashicorp.com/v1/check/vault" | jq -r '.current_version // empty' 2>/dev/null || true)
+if [ -z "$VAULT_VER" ]; then
+  err "Vault non installé (checkpoint-api indisponible) — le reste de la phase 6 est ignoré"
+else
 curl -sLO "https://releases.hashicorp.com/vault/$VAULT_VER/vault_${VAULT_VER}_linux_amd64.zip"
 unzip -oq "vault_${VAULT_VER}_linux_amd64.zip"
 install vault /usr/local/bin/
@@ -401,41 +539,57 @@ if [ ! -f /root/.vault-init ]; then
   [ -n "$UNSEAL_KEY" ] && vault operator unseal "$UNSEAL_KEY" || true
   ok "Vault $VAULT_VER initialisé — root token dans /root/.vault-init"
 fi
+fi # fin du bloc VAULT_VER
 
 # Skaffold
 curl -sLo /usr/local/bin/skaffold \
-  "https://storage.googleapis.com/skaffold/releases/latest/skaffold-linux-amd64"
-chmod +x /usr/local/bin/skaffold
-ok "Skaffold installé"
+  "https://storage.googleapis.com/skaffold/releases/latest/skaffold-linux-amd64" \
+  && chmod +x /usr/local/bin/skaffold \
+  && ok "Skaffold installé" || err "Skaffold non installé"
 
 # Stern
-STERN_VER=$(curl -s "https://api.github.com/repos/stern/stern/releases/latest" | jq -r .tag_name | tr -d v)
-curl -sLO "https://github.com/stern/stern/releases/download/v${STERN_VER}/stern_${STERN_VER}_linux_amd64.tar.gz"
-tar xzf "stern_${STERN_VER}_linux_amd64.tar.gz" stern
-install stern /usr/local/bin/
-rm -f stern stern_*.tar.gz
-ok "Stern $STERN_VER installé"
+STERN_VER=$(gh_latest stern/stern | tr -d v)
+if [ -n "$STERN_VER" ]; then
+  curl -sLO "https://github.com/stern/stern/releases/download/v${STERN_VER}/stern_${STERN_VER}_linux_amd64.tar.gz" \
+    && tar xzf "stern_${STERN_VER}_linux_amd64.tar.gz" stern \
+    && install stern /usr/local/bin/ \
+    && ok "Stern $STERN_VER installé" || err "Stern non installé"
+  rm -f stern stern_*.tar.gz
+else
+  err "Stern non installé (version introuvable)"
+fi
 
 # cosign
-COSIGN_VER=$(curl -s "https://api.github.com/repos/sigstore/cosign/releases/latest" | jq -r .tag_name)
-curl -sLo /usr/local/bin/cosign \
-  "https://github.com/sigstore/cosign/releases/download/$COSIGN_VER/cosign-linux-amd64"
-chmod +x /usr/local/bin/cosign
-ok "cosign $COSIGN_VER installé"
+COSIGN_VER=$(gh_latest sigstore/cosign)
+if [ -n "$COSIGN_VER" ]; then
+  curl -sLo /usr/local/bin/cosign \
+    "https://github.com/sigstore/cosign/releases/download/$COSIGN_VER/cosign-linux-amd64" \
+    && chmod +x /usr/local/bin/cosign \
+    && ok "cosign $COSIGN_VER installé" || err "cosign non installé"
+else
+  err "cosign non installé (version introuvable)"
+fi
 
 ok "[6/12] Azure CLI / GitHub CLI / ArgoCD / act / Vault / Skaffold / Stern / cosign installés"
+else
+  skip_msg "CI/CD Tools (profil devops uniquement)"
+fi
 
 # ==============================================================
 # 7. MONITORING — Prometheus + Grafana + Node Exporter
 # ==============================================================
 echo "[7/12] Stack Monitoring..."
 
-NE_VER=$(curl -s "https://api.github.com/repos/prometheus/node_exporter/releases/latest" \
-  | jq -r .tag_name | tr -d v)
-curl -sLO "https://github.com/prometheus/node_exporter/releases/download/v${NE_VER}/node_exporter-${NE_VER}.linux-amd64.tar.gz"
-tar xzf "node_exporter-${NE_VER}.linux-amd64.tar.gz"
-install "node_exporter-${NE_VER}.linux-amd64/node_exporter" /usr/local/bin/
-rm -rf node_exporter*
+NE_VER=$(gh_latest prometheus/node_exporter | tr -d v)
+if [ -n "$NE_VER" ]; then
+  curl -sLO "https://github.com/prometheus/node_exporter/releases/download/v${NE_VER}/node_exporter-${NE_VER}.linux-amd64.tar.gz" \
+    && tar xzf "node_exporter-${NE_VER}.linux-amd64.tar.gz" \
+    && install "node_exporter-${NE_VER}.linux-amd64/node_exporter" /usr/local/bin/ \
+    || err "node_exporter téléchargement/installation échoué"
+  rm -rf node_exporter*
+else
+  err "node_exporter non installé (version introuvable)"
+fi
 
 cat > /etc/systemd/system/node_exporter.service << 'EOF'
 [Unit]
@@ -456,8 +610,9 @@ ProtectHome=yes
 [Install]
 WantedBy=multi-user.target
 EOF
-systemctl enable --now node_exporter
-ok "Node Exporter $NE_VER démarré sur :9100"
+systemctl enable --now node_exporter \
+  && ok "Node Exporter $NE_VER démarré sur :9100" \
+  || err "Node Exporter non démarré"
 
 mkdir -p /etc/prometheus
 cat > /etc/prometheus/prometheus.yml << 'EOF'
@@ -493,17 +648,18 @@ docker run -d \
   --name grafana \
   --restart always \
   -p 3000:3000 \
-  -e GF_SECURITY_ADMIN_PASSWORD=admin \
+  -e GF_SECURITY_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD}" \
   -e GF_USERS_ALLOW_SIGN_UP=false \
   -v grafana_data:/var/lib/grafana \
   grafana/grafana-oss:latest \
-  && ok "Grafana démarré sur :3000" || err "Grafana non démarré"
+  && ok "Grafana démarré sur :3000 (admin / mot de passe généré par Terraform)" || err "Grafana non démarré"
 
 ok "[7/12] Prometheus (9090) + Grafana (3000) + Node Exporter (9100) installés"
 
 # ==============================================================
 # 8. PYTHON / DATAOPS
 # ==============================================================
+if should_run "dataops"; then
 echo "[8/12] Stack DataOps / Data Science Python..."
 
 python3 -m pip install --quiet --upgrade pip setuptools wheel 2>/dev/null || true
@@ -555,12 +711,12 @@ pip_install "dask[complete]" && ok "Dask installé"  || err "Dask non installé"
 
 # JupyterLab config
 sudo -u "$ADMIN_USER" mkdir -p "$HOME_DIR/.jupyter"
-cat > "$HOME_DIR/.jupyter/jupyter_lab_config.py" << 'EOF'
+cat > "$HOME_DIR/.jupyter/jupyter_lab_config.py" << EOF
 c.ServerApp.ip = '0.0.0.0'
 c.ServerApp.port = 8888
 c.ServerApp.open_browser = False
 c.ServerApp.allow_root = False
-c.ServerApp.token = ''
+c.ServerApp.token = '${JUPYTER_TOKEN}'
 c.ServerApp.password = ''
 c.ServerApp.root_dir = '/data/projects'
 c.ServerApp.allow_remote_access = True
@@ -591,6 +747,9 @@ EOF
 systemctl enable jupyter
 
 ok "[8/12] Python DataOps stack installé"
+else
+  skip_msg "Data Science / Jupyter (profil dataops uniquement)"
+fi
 
 # ==============================================================
 # 9. BASES DE DONNÉES — Clients + conteneurs Docker
@@ -620,13 +779,16 @@ docker run -d \
 
 ok "Conteneurs DB démarrés sur loopback (postgres:5432, redis:6379)"
 
-USQL_VER=$(curl -s "https://api.github.com/repos/xo/usql/releases/latest" \
-  | jq -r .tag_name | tr -d v)
-curl -sLO "https://github.com/xo/usql/releases/download/v${USQL_VER}/usql_static-${USQL_VER}-linux-amd64.tar.bz2" \
-  && tar xjf usql_static-*.tar.bz2 \
-  && install usql_static /usr/local/bin/usql \
-  && rm -f usql_static* \
-  && ok "usql $USQL_VER installé" || err "usql non installé"
+USQL_VER=$(gh_latest xo/usql | tr -d v)
+if [ -n "$USQL_VER" ]; then
+  curl -sLO "https://github.com/xo/usql/releases/download/v${USQL_VER}/usql_static-${USQL_VER}-linux-amd64.tar.bz2" \
+    && tar xjf usql_static-*.tar.bz2 \
+    && install usql_static /usr/local/bin/usql \
+    && rm -f usql_static* \
+    && ok "usql $USQL_VER installé" || err "usql non installé"
+else
+  err "usql non installé (version introuvable)"
+fi
 
 ok "[9/12] Clients DB + conteneurs Docker démarrés"
 
@@ -635,32 +797,43 @@ ok "[9/12] Clients DB + conteneurs Docker démarrés"
 # ==============================================================
 echo "[10/12] Outils réseau & sécurité..."
 
-apt-get install -y masscan tshark autossh vpnc openvpn wireguard \
-  && ok "Outils réseau installés" || err "Certains outils réseau non installés"
+if should_run "cybersecurity"; then
+  apt-get install -y masscan tshark autossh vpnc openvpn wireguard \
+    && ok "Outils réseau installés" || err "Certains outils réseau non installés"
+else
+  skip_msg "Outils réseau avancés (profil cybersecurity uniquement)"
+fi
 
-curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-  | sh -s -- -b /usr/local/bin \
-  && ok "Trivy installé" || err "Trivy non installé"
+if should_run "devops"; then
+  curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+    | sh -s -- -b /usr/local/bin \
+    && ok "Trivy installé" || err "Trivy non installé"
 
-HADO_VER=$(curl -s "https://api.github.com/repos/hadolint/hadolint/releases/latest" \
-  | jq -r .tag_name)
-curl -sLo /usr/local/bin/hadolint \
-  "https://github.com/hadolint/hadolint/releases/download/$HADO_VER/hadolint-Linux-x86_64"
-chmod +x /usr/local/bin/hadolint
-ok "Hadolint $HADO_VER installé"
+  HADO_VER=$(gh_latest hadolint/hadolint)
+  if [ -n "$HADO_VER" ]; then
+    curl -sLo /usr/local/bin/hadolint \
+      "https://github.com/hadolint/hadolint/releases/download/$HADO_VER/hadolint-Linux-x86_64" \
+      && chmod +x /usr/local/bin/hadolint \
+      && ok "Hadolint $HADO_VER installé" || err "Hadolint non installé"
+  else
+    err "Hadolint non installé (version introuvable)"
+  fi
+else
+  skip_msg "Trivy / Hadolint - scan sécurité conteneurs (profil devops uniquement)"
+fi
 
-# ── UFW ──────────────────────────────────────────────────────
+# ── UFW — toujours configuré, quel que soit le profil ─────────
 ufw --force reset
 ufw default deny incoming
 ufw default allow outgoing
 ufw allow 22/tcp   comment 'SSH'
 ufw allow 80/tcp   comment 'HTTP public'
 ufw allow 443/tcp  comment 'HTTPS public'
-ufw allow 8888/tcp comment 'JupyterLab'
+should_run "dataops" && ufw allow 8888/tcp comment 'JupyterLab'
 ufw allow 3000/tcp comment 'Grafana'
 ufw allow 9090/tcp comment 'Prometheus'
 ufw allow 9443/tcp comment 'Portainer'
-ufw allow 8200/tcp comment 'Vault'
+should_run "devops" && ufw allow 8200/tcp comment 'Vault'
 ufw --force enable
 ok "UFW configuré"
 
@@ -684,6 +857,7 @@ ok "[10/12] Réseau & sécurité OK"
 # ==============================================================
 # 10b. PENTEST & SÉCURITÉ OFFENSIVE
 # ==============================================================
+if should_run "cybersecurity"; then
 echo "[10b/12] Outils Pentest & Sécurité offensive..."
 
 apt-get install -y \
@@ -699,34 +873,50 @@ apt-get install -y \
   nbtscan \
   && ok "Outils pentest apt installés" || err "Certains outils pentest apt non installés"
 
-NUCLEI_VER=$(curl -s "https://api.github.com/repos/projectdiscovery/nuclei/releases/latest" | jq -r .tag_name)
-curl -sLO "https://github.com/projectdiscovery/nuclei/releases/download/$NUCLEI_VER/nuclei_${NUCLEI_VER#v}_linux_amd64.zip"
-unzip -oq nuclei_*.zip nuclei
-install nuclei /usr/local/bin/
-rm -f nuclei nuclei_*.zip
-sudo -u "$ADMIN_USER" /usr/local/bin/nuclei -update-templates 2>/dev/null || true
-ok "Nuclei $NUCLEI_VER installé (templates mis à jour)"
+NUCLEI_VER=$(gh_latest projectdiscovery/nuclei)
+if [ -n "$NUCLEI_VER" ]; then
+  curl -sLO "https://github.com/projectdiscovery/nuclei/releases/download/$NUCLEI_VER/nuclei_${NUCLEI_VER#v}_linux_amd64.zip" \
+    && unzip -oq nuclei_*.zip nuclei \
+    && install nuclei /usr/local/bin/ \
+    && ok "Nuclei $NUCLEI_VER installé" || err "Nuclei non installé"
+  rm -f nuclei nuclei_*.zip
+  sudo -u "$ADMIN_USER" /usr/local/bin/nuclei -update-templates 2>/dev/null || true
+else
+  err "Nuclei non installé (version introuvable)"
+fi
 
-FFUF_VER=$(curl -s "https://api.github.com/repos/ffuf/ffuf/releases/latest" | jq -r .tag_name)
-curl -sLO "https://github.com/ffuf/ffuf/releases/download/$FFUF_VER/ffuf_${FFUF_VER#v}_linux_amd64.tar.gz"
-tar xzf ffuf_*.tar.gz ffuf
-install ffuf /usr/local/bin/
-rm -f ffuf ffuf_*.tar.gz
-ok "ffuf $FFUF_VER installé"
+FFUF_VER=$(gh_latest ffuf/ffuf)
+if [ -n "$FFUF_VER" ]; then
+  curl -sLO "https://github.com/ffuf/ffuf/releases/download/$FFUF_VER/ffuf_${FFUF_VER#v}_linux_amd64.tar.gz" \
+    && tar xzf ffuf_*.tar.gz ffuf \
+    && install ffuf /usr/local/bin/ \
+    && ok "ffuf $FFUF_VER installé" || err "ffuf non installé"
+  rm -f ffuf ffuf_*.tar.gz
+else
+  err "ffuf non installé (version introuvable)"
+fi
 
-GOBB_VER=$(curl -s "https://api.github.com/repos/OJ/gobuster/releases/latest" | jq -r .tag_name)
-curl -sLO "https://github.com/OJ/gobuster/releases/download/$GOBB_VER/gobuster_Linux_x86_64.tar.gz"
-tar xzf gobuster_Linux_x86_64.tar.gz gobuster
-install gobuster /usr/local/bin/
-rm -f gobuster gobuster_*.tar.gz
-ok "gobuster $GOBB_VER installé"
+GOBB_VER=$(gh_latest OJ/gobuster)
+if [ -n "$GOBB_VER" ]; then
+  curl -sLO "https://github.com/OJ/gobuster/releases/download/$GOBB_VER/gobuster_Linux_x86_64.tar.gz" \
+    && tar xzf gobuster_Linux_x86_64.tar.gz gobuster \
+    && install gobuster /usr/local/bin/ \
+    && ok "gobuster $GOBB_VER installé" || err "gobuster non installé"
+  rm -f gobuster gobuster_*.tar.gz
+else
+  err "gobuster non installé (version introuvable)"
+fi
 
-AMASS_VER=$(curl -s "https://api.github.com/repos/owasp-amass/amass/releases/latest" | jq -r .tag_name)
-curl -sLO "https://github.com/owasp-amass/amass/releases/download/$AMASS_VER/amass_Linux_amd64.zip"
-unzip -oq amass_Linux_amd64.zip
-install amass_Linux_amd64/amass /usr/local/bin/
-rm -rf amass_Linux_amd64*
-ok "Amass $AMASS_VER installé"
+AMASS_VER=$(gh_latest owasp-amass/amass)
+if [ -n "$AMASS_VER" ]; then
+  curl -sLO "https://github.com/owasp-amass/amass/releases/download/$AMASS_VER/amass_Linux_amd64.zip" \
+    && unzip -oq amass_Linux_amd64.zip \
+    && install amass_Linux_amd64/amass /usr/local/bin/ \
+    && ok "Amass $AMASS_VER installé" || err "Amass non installé"
+  rm -rf amass_Linux_amd64*
+else
+  err "Amass non installé (version introuvable)"
+fi
 
 pip_install theHarvester && ok "theHarvester installé" || err "theHarvester non installé"
 
@@ -752,10 +942,14 @@ gunzip /usr/share/wordlists/rockyou.txt.gz 2>/dev/null || true
 ok "Wordlists configurées (/usr/share/wordlists/rockyou.txt)"
 
 ok "[10b/12] Outils Pentest installés"
+else
+  skip_msg "Pentest offensif (profil cybersecurity uniquement)"
+fi
 
 # ==============================================================
 # 11. LANGAGES — Go, Node.js, Rust, Java
 # ==============================================================
+if should_run "devops" || should_run "dataops"; then
 echo "[11/12] Langages de programmation..."
 
 GO_VER=$(curl -s "https://go.dev/dl/?mode=json" | jq -r '.[0].version')
@@ -800,6 +994,9 @@ sudo -u "$ADMIN_USER" bash -c 'curl -s "https://get.sdkman.io" | bash' \
   && ok "SDKMAN installé" || err "SDKMAN non installé"
 
 ok "[11/12] Go / Node.js / Rust / Java installés"
+else
+  skip_msg "Langages Go/Node/Rust/Java (profils devops et dataops)"
+fi
 
 # ==============================================================
 # 12. FINALISATION — MOTD, Vim, Git, devops-status
@@ -826,40 +1023,67 @@ colorscheme desert
 VIMRC
 ok "Vim configuré"
 
-cat > /etc/motd << 'MOTD'
+{
+cat << 'MOTD_HEAD'
 
   ╔══════════════════════════════════════════════════════════╗
   ║          DevOps Pro VM — Azure Students                 ║
   ║              Ubuntu 22.04 LTS                           ║
   ╠══════════════════════════════════════════════════════════╣
   ║  🐳 Docker        : docker ps                           ║
+  ║  📈 Grafana       : http://<IP>:3000  (admin / cf. `terraform output grafana_admin_password`) ║
+  ║  📉 Prometheus    : http://<IP>:9090                    ║
+  ║  🐋 Portainer     : https://<IP>:9443 (admin / cf. `terraform output portainer_admin_password`) ║
+  ║  🐘 PostgreSQL    : localhost:5432    (postgres/postgres)║
+  ║  🔴 Redis         : localhost:6379                       ║
+MOTD_HEAD
+
+if should_run "devops"; then
+cat << 'MOTD_DEVOPS'
+  ╠══════════════════════════════════════════════════════════╣
   ║  ☸  Kubernetes    : kubectl get nodes                   ║
   ║  🏗  Terraform     : terraform --version                 ║
   ║  🔐 Vault         : http://<IP>:8200 (init /root)       ║
   ║  📦 Skaffold      : skaffold version                    ║
-  ║  📊 Jupyter       : http://<IP>:8888                    ║
-  ║  📈 Grafana       : http://<IP>:3000  (admin/admin)     ║
-  ║  📉 Prometheus    : http://<IP>:9090                    ║
-  ║  🐋 Portainer     : https://<IP>:9443                   ║
+MOTD_DEVOPS
+fi
+
+if should_run "dataops"; then
+cat << 'MOTD_DATAOPS'
   ╠══════════════════════════════════════════════════════════╣
-  ║  🐘 PostgreSQL    : localhost:5432    (postgres/postgres)║
-  ║  🔴 Redis         : localhost:6379                       ║
+  ║  📊 Jupyter       : http://<IP>:8888  (token: cf. `terraform output jupyter_token`) ║
+MOTD_DATAOPS
+fi
+
+if should_run "cybersecurity"; then
+cat << 'MOTD_CYBER'
   ╠══════════════════════════════════════════════════════════╣
   ║  🔍 Pentest       : nuclei / ffuf / gobuster / sqlmap   ║
   ║  🌐 OSINT         : theHarvester / amass                ║
   ║  💣 Exploit       : msfconsole (Metasploit)             ║
   ║  📚 Wordlists     : /opt/SecLists / rockyou.txt         ║
   ║  📁 Pentest dir   : /data/pentest/                      ║
+MOTD_CYBER
+fi
+
+cat << MOTD_TAIL
   ╠══════════════════════════════════════════════════════════╣
+  ║  🏷  Profil VM     : $VM_PROFILE
   ║  💾 Data Disk     : /data/                              ║
   ║  📋 Install Log   : /var/log/devops-install.log         ║
   ║  🔍 Statut        : devops-status                       ║
   ╚══════════════════════════════════════════════════════════╝
 
-MOTD
+MOTD_TAIL
+} > /etc/motd
+ok "MOTD généré pour le profil \"$VM_PROFILE\""
 
-cat > /usr/local/bin/devops-status << 'STATUS'
+cat > /usr/local/bin/devops-status << STATUSHEAD
 #!/bin/bash
+echo "Profil VM        : $VM_PROFILE"
+STATUSHEAD
+
+cat >> /usr/local/bin/devops-status << 'STATUS'
 echo ""
 echo "╔══════════════════════════════════════════════════╗"
 echo "║            DevOps VM - Status                  ║"
@@ -899,8 +1123,213 @@ echo ""
 STATUS
 chmod +x /usr/local/bin/devops-status
 
+# ── Landing page de statut (nginx, port 80) ──────────────────
+apt-get install -y nginx >/dev/null 2>&1 && ok "nginx installé" || err "nginx non installé"
+
+DEVOPS_ON=$(should_run "devops" && echo true || echo false)
+DATAOPS_ON=$(should_run "dataops" && echo true || echo false)
+CYBER_ON=$(should_run "cybersecurity" && echo true || echo false)
+
+mkdir -p /var/www/html
+cat > /var/www/html/index.html << 'DASHBOARD_EOF'
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DevOps Pro VM — Tableau de bord</title>
+<style>
+  :root{
+    --bg:#0f1117; --panel:#161923; --panel-2:#1d2030; --border:#2a2e3f;
+    --text:#e8e9ee; --muted:#8b8fa3; --accent:#6ee7b7; --accent-2:#60a5fa;
+    --danger:#f87171; --warn:#fbbf24;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    background:radial-gradient(1200px 600px at 10% -10%, #1a2036 0%, var(--bg) 60%);
+    color:var(--text); min-height:100vh; padding:32px 20px 60px;
+  }
+  .wrap{max-width:960px; margin:0 auto;}
+  header{margin-bottom:28px;}
+  h1{font-size:26px; margin:0 0 6px; letter-spacing:.2px;}
+  .sub{color:var(--muted); font-size:14px;}
+  .profile-badge{
+    display:inline-flex; align-items:center; gap:8px; margin-top:14px;
+    background:var(--panel-2); border:1px solid var(--border); border-radius:999px;
+    padding:8px 16px; font-size:13px; color:var(--accent);
+  }
+  .profile-badge b{color:var(--text); text-transform:capitalize;}
+  .grid{
+    display:grid; grid-template-columns:repeat(auto-fill, minmax(240px,1fr));
+    gap:16px; margin-top:22px;
+  }
+  .card{
+    background:var(--panel); border:1px solid var(--border); border-radius:14px;
+    padding:18px; display:flex; flex-direction:column; gap:10px;
+    transition:transform .15s ease, border-color .15s ease;
+  }
+  .card:hover{transform:translateY(-2px); border-color:#3a3f57;}
+  .card-top{display:flex; align-items:center; justify-content:space-between;}
+  .card-title{display:flex; align-items:center; gap:10px; font-weight:600; font-size:15px;}
+  .icon{font-size:20px;}
+  .dot{width:9px; height:9px; border-radius:50%; background:var(--muted); flex-shrink:0;}
+  .dot.up{background:var(--accent); box-shadow:0 0 8px var(--accent);}
+  .dot.down{background:var(--danger); box-shadow:0 0 8px var(--danger);}
+  .desc{color:var(--muted); font-size:13px; line-height:1.4;}
+  .row{display:flex; gap:8px; margin-top:4px;}
+  a.btn, button.btn{
+    flex:1; text-align:center; text-decoration:none; font-size:13px; font-weight:500;
+    padding:8px 10px; border-radius:8px; border:1px solid var(--border);
+    background:var(--panel-2); color:var(--text); cursor:pointer;
+  }
+  a.btn:hover, button.btn:hover{border-color:var(--accent-2);}
+  .note{font-size:11px; color:var(--muted); margin-top:2px;}
+  .empty{
+    grid-column:1/-1; color:var(--muted); font-size:14px; text-align:center;
+    padding:30px; border:1px dashed var(--border); border-radius:14px;
+  }
+  footer{margin-top:36px; color:var(--muted); font-size:12px; text-align:center;}
+  code{background:var(--panel-2); padding:2px 6px; border-radius:6px; font-size:12px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>🖥️ DevOps Pro VM</h1>
+    <div class="sub">Tableau de bord des services installés sur cette machine</div>
+    <div class="profile-badge">🏷 Profil actif : <b id="profile-name">-</b></div>
+  </header>
+
+  <div class="grid" id="grid"></div>
+
+  <footer>
+    Statut vérifié depuis votre navigateur (sans données envoyées à un tiers) ·
+    Identifiants générés par Terraform : <code>terraform output</code> ·
+    Détails complets : <code>devops-status</code> en SSH
+  </footer>
+</div>
+
+<script>
+var PROFILE = "PLACEHOLDER_PROFILE";
+var HOST = window.location.hostname;
+
+var SERVICES = [
+  { name:"Grafana", icon:"📈", port:3000, https:false, enabled:true,
+    desc:"Dashboards de monitoring. Identifiant admin, mot de passe généré." },
+  { name:"Prometheus", icon:"📉", port:9090, https:false, enabled:true,
+    desc:"Moteur de métriques, source de données de Grafana." },
+  { name:"Portainer", icon:"🐋", port:9443, https:true, enabled:true,
+    desc:"Interface de gestion Docker. Certificat auto-signé : acceptez l'avertissement au premier accès." },
+  { name:"JupyterLab", icon:"📊", port:8888, https:false, enabled:PLACEHOLDER_DATAOPS,
+    desc:"Notebooks Python / data science. Lien avec token déjà inclus." },
+  { name:"Vault", icon:"🔐", port:8200, https:false, enabled:PLACEHOLDER_DEVOPS,
+    desc:"Secrets management HashiCorp. Root token dans /root/.vault-init sur la VM." }
+];
+
+function buildUrl(s){
+  return (s.https ? "https://" : "http://") + HOST + ":" + s.port;
+}
+
+function makeCard(s){
+  var url = buildUrl(s);
+  var card = document.createElement("div");
+  card.className = "card";
+
+  var top = document.createElement("div");
+  top.className = "card-top";
+  var title = document.createElement("div");
+  title.className = "card-title";
+  title.innerHTML = '<span class="icon">' + s.icon + '</span><span>' + s.name + '</span>';
+  var dot = document.createElement("span");
+  dot.className = "dot";
+  dot.id = "dot-" + s.name;
+  top.appendChild(title);
+  top.appendChild(dot);
+  card.appendChild(top);
+
+  var desc = document.createElement("div");
+  desc.className = "desc";
+  desc.textContent = s.desc;
+  card.appendChild(desc);
+
+  var row = document.createElement("div");
+  row.className = "row";
+  var open = document.createElement("a");
+  open.className = "btn";
+  open.href = url;
+  open.target = "_blank";
+  open.rel = "noopener";
+  open.textContent = "Ouvrir";
+  var copy = document.createElement("button");
+  copy.className = "btn";
+  copy.textContent = "Copier le lien";
+  copy.onclick = function(){
+    navigator.clipboard.writeText(url).then(function(){
+      copy.textContent = "Copié !";
+      setTimeout(function(){ copy.textContent = "Copier le lien"; }, 1500);
+    });
+  };
+  row.appendChild(open);
+  row.appendChild(copy);
+  card.appendChild(row);
+
+  var note = document.createElement("div");
+  note.className = "note";
+  note.textContent = url;
+  card.appendChild(note);
+
+  return card;
+}
+
+function checkStatus(s){
+  var dot = document.getElementById("dot-" + s.name);
+  if(!dot) return;
+  var url = buildUrl(s);
+  var controller = new AbortController();
+  var timer = setTimeout(function(){ controller.abort(); }, 2500);
+  fetch(url, { mode:"no-cors", signal:controller.signal })
+    .then(function(){ clearTimeout(timer); dot.className = "dot up"; })
+    .catch(function(){ clearTimeout(timer); dot.className = "dot down"; });
+}
+
+function render(){
+  document.getElementById("profile-name").textContent = PROFILE;
+  var grid = document.getElementById("grid");
+  grid.innerHTML = "";
+  var active = SERVICES.filter(function(s){ return s.enabled; });
+  if(active.length === 0){
+    var empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = "Aucun service web pour ce profil.";
+    grid.appendChild(empty);
+    return;
+  }
+  active.forEach(function(s){
+    grid.appendChild(makeCard(s));
+    checkStatus(s);
+  });
+  setInterval(function(){ active.forEach(checkStatus); }, 15000);
+}
+
+render();
+</script>
+</body>
+</html>
+DASHBOARD_EOF
+
+# Substitution des valeurs de profil (évite tout risque d'échappement JS
+# dans le heredoc ci-dessus : on remplace ici, une fois le fichier écrit).
+sed -i "s/PLACEHOLDER_PROFILE/${VM_PROFILE}/g; s/PLACEHOLDER_DATAOPS/${DATAOPS_ON}/g; s/PLACEHOLDER_DEVOPS/${DEVOPS_ON}/g" /var/www/html/index.html
+
+systemctl enable --now nginx \
+  && ok "Landing page de statut disponible sur http://<IP>/" \
+  || err "nginx non démarré"
+
 systemctl daemon-reload
-systemctl start jupyter 2>/dev/null && ok "JupyterLab démarré sur :8888" || err "JupyterLab non démarré (vérifier : journalctl -u jupyter)"
+if should_run "dataops"; then
+  systemctl start jupyter 2>/dev/null && ok "JupyterLab démarré sur :8888" || err "JupyterLab non démarré (vérifier : journalctl -u jupyter)"
+fi
 
 chown -R "$ADMIN_USER:$ADMIN_USER" "$HOME_DIR"
 chown -R "$ADMIN_USER:$ADMIN_USER" "$DATA_MOUNT" 2>/dev/null || true

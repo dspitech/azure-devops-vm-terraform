@@ -1,7 +1,10 @@
 # =============================================================
 #  NETWORK — VNet / Subnet / NSG
-#  Ports ouverts : 22, 80, 443, 8888, 3000, 9090, 9443, 8200
-#  Ports internes VNet uniquement : 9100, 5432, 3306, 6379, 27017
+#  Ports ouverts (restreints à l'IP auto-détectée du déployeur) :
+#    22 (SSH), 8888 (Jupyter), 3000 (Grafana), 9443 (Portainer),
+#    9090 (Prometheus), 8200 (Vault)
+#  Ports ouverts à tout Internet : 80, 443
+#  Ports internes VNet uniquement : 9100 (Node Exporter), 5432 (Postgres), 6379 (Redis)
 # =============================================================
 
 # ─── Virtual Network ─────────────────────────────────────────
@@ -30,8 +33,9 @@ resource "azurerm_network_security_group" "nsg" {
   tags                = var.tags
 
   # ── SSH ──────────────────────────────────────────────────
-  # Restreint à votre IP uniquement (var.allowed_ssh_cidr)
-  # Recommandation : curl ifconfig.me pour trouver votre IP
+  # Restreint à local.effective_ssh_cidr : IP publique détectée
+  # automatiquement (var.allowed_ssh_cidr = "auto", défaut), ou la
+  # valeur explicite fournie par l'utilisateur.
   security_rule {
     name                       = "allow-ssh"
     priority                   = 100
@@ -40,7 +44,7 @@ resource "azurerm_network_security_group" "nsg" {
     protocol                   = "Tcp"
     source_port_range          = "*"
     destination_port_range     = "22"
-    source_address_prefix      = var.allowed_ssh_cidr
+    source_address_prefix      = local.effective_ssh_cidr
     destination_address_prefix = "*"
   }
 
@@ -72,16 +76,20 @@ resource "azurerm_network_security_group" "nsg" {
 
   # ── JupyterLab ───────────────────────────────────────────
   # Jamais exposé publiquement — restreint à allowed_ssh_cidr
-  security_rule {
-    name                       = "allow-jupyter"
-    priority                   = 130
-    direction                  = "Inbound"
-    access                     = "Allow"
-    protocol                   = "Tcp"
-    source_port_range          = "*"
-    destination_port_range     = "8888"
-    source_address_prefix      = var.allowed_ssh_cidr
-    destination_address_prefix = "*"
+  # Créée uniquement si le profil installe JupyterLab (dataops/fullstack)
+  dynamic "security_rule" {
+    for_each = local.profile_dataops ? [1] : []
+    content {
+      name                       = "allow-jupyter"
+      priority                   = 130
+      direction                  = "Inbound"
+      access                     = "Allow"
+      protocol                   = "Tcp"
+      source_port_range          = "*"
+      destination_port_range     = "8888"
+      source_address_prefix      = local.effective_ssh_cidr
+      destination_address_prefix = "*"
+    }
   }
 
   # ── Grafana ──────────────────────────────────────────────
@@ -93,7 +101,7 @@ resource "azurerm_network_security_group" "nsg" {
     protocol                   = "Tcp"
     source_port_range          = "*"
     destination_port_range     = "3000"
-    source_address_prefix      = var.allowed_ssh_cidr
+    source_address_prefix      = local.effective_ssh_cidr
     destination_address_prefix = "*"
   }
 
@@ -106,7 +114,7 @@ resource "azurerm_network_security_group" "nsg" {
     protocol                   = "Tcp"
     source_port_range          = "*"
     destination_port_range     = "9443"
-    source_address_prefix      = var.allowed_ssh_cidr
+    source_address_prefix      = local.effective_ssh_cidr
     destination_address_prefix = "*"
   }
 
@@ -119,21 +127,25 @@ resource "azurerm_network_security_group" "nsg" {
     protocol                   = "Tcp"
     source_port_range          = "*"
     destination_port_range     = "9090"
-    source_address_prefix      = var.allowed_ssh_cidr
+    source_address_prefix      = local.effective_ssh_cidr
     destination_address_prefix = "*"
   }
 
   # ── Vault (HashiCorp) — API + UI sur le même port ────────
-  security_rule {
-    name                       = "allow-vault"
-    priority                   = 170
-    direction                  = "Inbound"
-    access                     = "Allow"
-    protocol                   = "Tcp"
-    source_port_range          = "*"
-    destination_port_range     = "8200"
-    source_address_prefix      = var.allowed_ssh_cidr
-    destination_address_prefix = "*"
+  # Créée uniquement si le profil installe Vault (devops/fullstack)
+  dynamic "security_rule" {
+    for_each = local.profile_devops ? [1] : []
+    content {
+      name                       = "allow-vault"
+      priority                   = 170
+      direction                  = "Inbound"
+      access                     = "Allow"
+      protocol                   = "Tcp"
+      source_port_range          = "*"
+      destination_port_range     = "8200"
+      source_address_prefix      = local.effective_ssh_cidr
+      destination_address_prefix = "*"
+    }
   }
 
   # ── Node Exporter — interne VNet uniquement ───────────────
@@ -152,9 +164,11 @@ resource "azurerm_network_security_group" "nsg" {
   }
 
   # ── Bases de données — VNet interne uniquement ────────────
-  # PostgreSQL (5432), MySQL (3306), Redis (6379), MongoDB (27017)
-  # Les conteneurs écoutent déjà sur 127.0.0.1 dans le cloud-init
-  # Cette règle NSG ajoute une couche de défense en profondeur
+  # PostgreSQL (5432), Redis (6379) — seuls conteneurs réellement
+  # déployés par cloud-init/install.sh (MySQL/MongoDB ont été retirés).
+  # Les conteneurs écoutent déjà sur 127.0.0.1 : cette règle NSG
+  # n'ajoute qu'une couche de défense en profondeur supplémentaire.
+  # Ajoutez ici 3306/27017 si vous réactivez MySQL/MongoDB dans install.sh.
   security_rule {
     name                       = "allow-db-internal"
     priority                   = 190
@@ -162,7 +176,7 @@ resource "azurerm_network_security_group" "nsg" {
     access                     = "Allow"
     protocol                   = "Tcp"
     source_port_range          = "*"
-    destination_port_ranges    = ["5432", "3306", "6379", "27017"]
+    destination_port_ranges    = ["5432", "6379"]
     source_address_prefix      = var.vnet_address_space
     destination_address_prefix = "*"
   }
@@ -177,7 +191,7 @@ resource "azurerm_network_security_group" "nsg" {
   #   protocol                   = "Tcp"
   #   source_port_range          = "*"
   #   destination_port_range     = "8080"
-  #   source_address_prefix      = var.allowed_ssh_cidr
+  #   source_address_prefix      = local.effective_ssh_cidr
   #   destination_address_prefix = "*"
   # }
 

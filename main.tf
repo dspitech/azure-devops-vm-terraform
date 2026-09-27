@@ -18,7 +18,59 @@ terraform {
       source  = "hashicorp/tls"
       version = "~> 4.0"
     }
+    local = {
+      source  = "hashicorp/local"
+      version = "~> 2.4"
+    }
+    http = {
+      source  = "hashicorp/http"
+      version = "~> 3.4"
+    }
   }
+}
+
+# ─── Détection automatique de l'IP publique du déployeur ─────
+# Permet de restreindre SSH/Jupyter/Grafana/etc. sans étape manuelle
+# quand allowed_ssh_cidr = "auto" (valeur par défaut, voir variables.tf).
+data "http" "my_ip" {
+  count = var.allowed_ssh_cidr == "auto" ? 1 : 0
+  url   = "https://ifconfig.me/ip"
+}
+
+locals {
+  # CIDR effectif utilisé par le NSG : IP auto-détectée, valeur fournie,
+  # ou "*" si l'utilisateur l'a explicitement demandé.
+  effective_ssh_cidr = var.allowed_ssh_cidr == "auto" ? "${trimspace(data.http.my_ip[0].response_body)}/32" : var.allowed_ssh_cidr
+
+  data_disk_lun = 10
+
+  # Indique, pour le profil choisi, quelles familles d'outils sont actives.
+  # "fullstack" active tout ; sinon seul le profil demandé (+ le socle
+  # commun, toujours installé côté cloud-init) est activé. Utilisé ici
+  # pour n'ouvrir dans le NSG que les ports des services réellement
+  # installés par cloud-init/install.sh (voir should_run() dans le script).
+  profile_devops        = var.vm_profile == "devops" || var.vm_profile == "fullstack"
+  profile_dataops       = var.vm_profile == "dataops" || var.vm_profile == "fullstack"
+  profile_cybersecurity = var.vm_profile == "cybersecurity" || var.vm_profile == "fullstack"
+
+  # En-tête injecté avant le script cloud-init : transmet à la VM les
+  # valeurs choisies côté Terraform (nom d'utilisateur, mots de passe
+  # générés, numéro de LUN du disque de données, profil) sans avoir à
+  # templater (et donc risquer de casser) l'intégralité du script bash.
+  cloud_init_header = <<-EOT
+    #!/bin/bash
+    export ADMIN_USER="${var.admin_username}"
+    export GRAFANA_ADMIN_PASSWORD="${random_password.grafana.result}"
+    export JUPYTER_TOKEN="${random_password.jupyter_token.result}"
+    export PORTAINER_ADMIN_PASSWORD="${random_password.portainer.result}"
+    export DATA_DISK_LUN="${local.data_disk_lun}"
+    export VM_PROFILE="${var.vm_profile}"
+  EOT
+
+  # Le fichier install.sh a lui-même un shebang en première ligne ; on
+  # le retire pour ne pas avoir un deuxième "#!/bin/bash" au milieu du
+  # script (inoffensif en bash, mais on préfère un fichier propre).
+  install_script_body = join("\n", slice(split("\n", file("${path.module}/cloud-init/install.sh")), 1, length(split("\n", file("${path.module}/cloud-init/install.sh")))))
 }
 
 # ─── Resource Group ──────────────────────────────────────────
@@ -50,6 +102,27 @@ resource "local_sensitive_file" "private_key" {
 resource "local_file" "public_key" {
   content  = tls_private_key.ssh.public_key_openssh
   filename = "${path.module}/keys/${var.vm_name}_id_rsa.pub"
+}
+
+# ─── Identifiants générés automatiquement (0 étape manuelle) ─
+# Grafana, Jupyter et Portainer ne restent plus jamais sur des
+# identifiants par défaut (admin/admin, token vide...). Récupérables
+# ensuite via `terraform output grafana_admin_password` etc.
+resource "random_password" "grafana" {
+  length  = 20
+  special = false
+}
+
+resource "random_password" "jupyter_token" {
+  length  = 32
+  special = false
+}
+
+resource "random_password" "portainer" {
+  length  = 20
+  special = true
+  # Portainer impose un jeu de caractères restreint pour son mot de passe initial
+  override_special = "-_"
 }
 
 # ─── Storage Account (boot diagnostics) ──────────────────────
@@ -104,6 +177,8 @@ resource "azurerm_linux_virtual_machine" "vm" {
   admin_username        = var.admin_username
   network_interface_ids = [azurerm_network_interface.nic.id]
 
+  disable_password_authentication = true
+
   admin_ssh_key {
     username   = var.admin_username
     public_key = tls_private_key.ssh.public_key_openssh
@@ -127,8 +202,9 @@ resource "azurerm_linux_virtual_machine" "vm" {
     storage_account_uri = azurerm_storage_account.diag.primary_blob_endpoint
   }
 
-  # Inject the install script via cloud-init
-  custom_data = base64encode(file("${path.module}/cloud-init/install.sh"))
+  # Injecte le script cloud-init, précédé d'un en-tête qui exporte les
+  # valeurs générées par Terraform (utilisateur, mots de passe, LUN).
+  custom_data = base64encode(join("\n", [local.cloud_init_header, local.install_script_body]))
 
   tags = var.tags
 }
@@ -147,6 +223,6 @@ resource "azurerm_managed_disk" "data" {
 resource "azurerm_virtual_machine_data_disk_attachment" "data" {
   managed_disk_id    = azurerm_managed_disk.data.id
   virtual_machine_id = azurerm_linux_virtual_machine.vm.id
-  lun                = 10
+  lun                = local.data_disk_lun
   caching            = "ReadWrite"
 }
