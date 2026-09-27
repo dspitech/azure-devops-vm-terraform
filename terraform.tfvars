@@ -1,5 +1,5 @@
 # =============================================================
-#  terraform.tfvars  — Personnalisez ces valeurs
+#  terraform.tfvars  - Personnalisez ces valeurs
 # =============================================================
 
 resource_group_name = "rg-devops-pro-vm"

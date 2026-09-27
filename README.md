@@ -75,6 +75,13 @@ terraform apply -var-file="examples/devops.tfvars"
 # ou : dataops.tfvars / cybersecurity.tfvars / fullstack.tfvars
 ```
 
+> Ces fichiers ne fixent volontairement **pas** `allowed_ssh_cidr` : si vous
+> l'avez déjà défini dans votre propre `terraform.tfvars` (ex. votre IP
+> réelle), cette valeur s'applique automatiquement — Terraform charge
+> `terraform.tfvars` en premier, puis complète avec le fichier `-var-file`
+> pour tout ce qu'il ne définit pas. Sans `terraform.tfvars` personnalisé,
+> la détection automatique (`"auto"`) s'applique par défaut.
+
 Vous pouvez aussi simplement fixer `vm_profile` dans votre propre
 `terraform.tfvars` :
 
@@ -90,8 +97,10 @@ phases non concernées (visible dans `/var/log/devops-install.log` et via
 
 Un **tableau de bord de statut** est généré automatiquement (voir
 [Accéder aux services](#5-accéder-aux-services)) : accessible sur
-`http://<IP>/`, il affiche le profil actif et un lien direct + un indicateur
-d'état en temps réel pour chaque service installé.
+`http://<IP>/`, il affiche le profil actif, un lien direct + un indicateur
+d'état en temps réel pour chaque service web installé, ainsi que
+l'inventaire complet des logiciels installés (avec leur version réelle),
+regroupé par catégorie et filtré selon le profil actif.
 
 ---
 
@@ -301,7 +310,7 @@ Sinon, les services sont accessibles directement (remplacer `<IP>` par l'IP publ
 | Portainer | https://\<IP\>:9443 | `admin` / mot de passe généré → `terraform output portainer_admin_password` (compte déjà initialisé, aucune action requise) | tous |
 | Vault UI | http://\<IP\>:8200/ui | Root token dans `/root/.vault-init` sur la VM | `devops` / `fullstack` |
 
-> **Sécurité** : tous ces ports sont restreints par défaut à l'IP publique détectée automatiquement au moment du `terraform apply` (`allowed_ssh_cidr = "auto"`), à l'exception du tableau de bord (port 80) qui est volontairement public — il n'affiche que des liens, aucune information sensible. Si votre IP change ensuite, mettez à jour `terraform.tfvars` avec la nouvelle IP (ou ré-appliquez pour redétecter) puis relancez `terraform apply`.
+> **Sécurité** : tous ces ports sont restreints par défaut à l'IP publique détectée automatiquement au moment du `terraform apply` (`allowed_ssh_cidr = "auto"`), à l'exception du tableau de bord (port 80) qui est volontairement public — il n'affiche que des liens et un inventaire des logiciels installés (versions), aucun secret ni information sensible. Si votre IP change ensuite, mettez à jour `terraform.tfvars` avec la nouvelle IP (ou ré-appliquez pour redétecter) puis relancez `terraform apply`.
 
 ---
 

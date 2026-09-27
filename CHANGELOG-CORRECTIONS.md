@@ -213,3 +213,57 @@ problèmes que la validation statique ne pouvait pas détecter :
 
 Un script `fix-existing-vm.sh` a été fourni séparément pour corriger une VM
 déjà déployée sans avoir à la recréer.
+
+---
+
+## Ajout ultérieur — Second retour de déploiement + inventaire logiciel
+
+**Bug supplémentaire signalé** : `tflint non installé` avec l'erreur `bash:
+line 1: 404: command not found`. Cause : le script officiel
+`install_linux.sh` de tflint a été retiré de la branche `master` du dépôt
+(confirmé en interrogeant directement `raw.githubusercontent.com` : 404 sur
+`master`, 200 sur un tag de version figé) — de nombreux tutoriels encore en
+ligne citent cette méthode désormais obsolète. → Remplacé par un
+téléchargement direct du binaire depuis les releases GitHub (`gh_latest`),
+comme pour les autres outils du script.
+
+**Nouvelle fonctionnalité demandée** : afficher sur le tableau de bord web
+la liste des logiciels réellement installés, filtrée par profil (comme
+`devops-status`, mais en version web). Implémentation :
+
+- Une trentaine d'outils sont désormais détectés à l'installation (phase
+  12), avec leur version réelle, et regroupés en 5 catégories : *Socle
+  commun*, *DevOps & Cloud*, *Data & IA*, *Cybersécurité*, *Langages*.
+- Chaque catégorie n'apparaît que si au moins un outil qu'elle contient est
+  activé pour le profil courant (mêmes conditions `should_run()` que le
+  reste du script) — chaque profil affiche donc une liste différente,
+  conforme à la demande.
+- Un outil non installé/injoignable affiche `—` plutôt qu'une fausse
+  version.
+- **Changement technique important** : la substitution des valeurs dans le
+  HTML généré (profil, booléens, versions d'outils) est passée de `sed` à
+  un script Python (`json.dumps`), pour éviter tout risque de casse de la
+  syntaxe JavaScript si une version d'outil contient des guillemets ou des
+  caractères spéciaux (cas réel : `java -version` renvoie une chaîne
+  contenant des guillemets doubles). Testé avec une valeur volontairement
+  adversariale (guillemets + antislashs) : la page générée reste
+  syntaxiquement valide.
+
+---
+
+## Ajout ultérieur — Conflit entre `terraform.tfvars` et `examples/*.tfvars`
+
+**Problème signalé** : un utilisateur ayant déjà fixé son IP réelle dans
+`terraform.tfvars` (`allowed_ssh_cidr = "203.0.113.45/32"`) constatait que le
+déploiement via `terraform apply -var-file="examples/devops.tfvars"`
+revenait à `"auto"`, réintroduisant le piège Cloud Shell déjà documenté plus
+haut. Cause : Terraform charge automatiquement `terraform.tfvars`, **puis**
+charge les fichiers passés en `-var-file`, qui ont une priorité plus élevée
+— chaque fichier `examples/*.tfvars` fixait `allowed_ssh_cidr = "auto"` en
+dur, écrasant donc systématiquement la valeur de `terraform.tfvars`.
+
+→ Cette ligne a été retirée (mise en commentaire, avec explication) des 4
+fichiers `examples/*.tfvars`. Désormais, la valeur de `terraform.tfvars`
+s'applique normalement même en passant un `-var-file` de profil ; en
+l'absence de `terraform.tfvars` personnalisé, le défaut `"auto"` de la
+variable s'applique toujours.

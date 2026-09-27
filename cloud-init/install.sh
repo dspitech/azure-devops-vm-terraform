@@ -436,8 +436,16 @@ fi
 
 pip_install ansible ansible-lint molecule && ok "Ansible installé" || err "Ansible non installé"
 
-curl -s https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash \
-  && ok "tflint installé" || err "tflint non installé"
+TFLINT_VER=$(gh_latest terraform-linters/tflint)
+if [ -n "$TFLINT_VER" ]; then
+  curl -sLO "https://github.com/terraform-linters/tflint/releases/download/${TFLINT_VER}/tflint_linux_amd64.zip" \
+    && unzip -oq tflint_linux_amd64.zip tflint \
+    && install tflint /usr/local/bin/ \
+    && ok "tflint $TFLINT_VER installé" || err "tflint non installé"
+  rm -f tflint tflint_linux_amd64.zip
+else
+  err "tflint non installé (version introuvable)"
+fi
 
 ok "[5/12] Terraform / Terragrunt / Ansible / Packer installés"
 else
@@ -1046,7 +1054,7 @@ ok "Vim configuré"
 cat << 'MOTD_HEAD'
 
   ╔══════════════════════════════════════════════════════════╗
-  ║          DevOps Pro VM — Azure Students                 ║
+  ║            Pro VM — Azure Students                 ║
   ║              Ubuntu 22.04 LTS                           ║
   ╠══════════════════════════════════════════════════════════╣
   ║  🐳 Docker        : docker ps                           ║
@@ -1149,6 +1157,41 @@ DEVOPS_ON=$(should_run "devops" && echo true || echo false)
 DATAOPS_ON=$(should_run "dataops" && echo true || echo false)
 CYBER_ON=$(should_run "cybersecurity" && echo true || echo false)
 
+# ── Inventaire des logiciels installés (pour le dashboard) ────
+# Chaque valeur est vide si l'outil n'est pas installé / injoignable :
+# le dashboard affiche alors "—" plutôt qu'une fausse information.
+V_DOCKER=$(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',')
+V_GIT=$(git --version 2>/dev/null | awk '{print $3}')
+V_PYTHON=$(python3 --version 2>/dev/null | awk '{print $2}')
+
+V_KUBECTL=$(kubectl version --client 2>/dev/null | grep -oP 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+V_HELM=$(helm version --short 2>/dev/null | cut -d'+' -f1)
+V_K9S=$(k9s version 2>/dev/null | grep -i version | head -1 | awk '{print $NF}')
+V_KIND=$(kind version 2>/dev/null | awk '{print $2}')
+V_TERRAFORM=$(terraform version -json 2>/dev/null | jq -r '.terraform_version' 2>/dev/null)
+V_TERRAGRUNT=$(terragrunt --version 2>/dev/null | awk '{print $3}')
+V_PACKER=$(packer version 2>/dev/null | head -1 | awk '{print $2}')
+V_ANSIBLE=$(ansible --version 2>/dev/null | head -1 | grep -oP '[0-9]+\.[0-9]+\.[0-9]+')
+V_TFLINT=$(tflint --version 2>/dev/null | head -1 | awk '{print $NF}')
+V_VAULT=$(vault version 2>/dev/null | awk '{print $2}')
+V_AZCLI=$(az version 2>/dev/null | jq -r '."azure-cli"' 2>/dev/null)
+V_GHCLI=$(gh --version 2>/dev/null | head -1 | awk '{print $3}')
+V_ARGOCD=$(argocd version --client 2>/dev/null | grep -oP 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+V_TRIVY=$(trivy --version 2>/dev/null | head -1 | awk '{print $2}')
+
+V_JUPYTER=$(jupyter --version 2>/dev/null | head -1)
+
+V_NUCLEI=$(command -v nuclei >/dev/null 2>&1 && nuclei -version 2>&1 | grep -oP 'v[0-9][0-9.]*' | head -1)
+V_METASPLOIT=$(command -v msfconsole >/dev/null 2>&1 && echo "installé")
+V_FFUF=$(ffuf -V 2>/dev/null | awk '{print $2}')
+V_GOBUSTER=$(command -v gobuster >/dev/null 2>&1 && echo "installé")
+V_AMASS=$(command -v amass >/dev/null 2>&1 && echo "installé")
+V_SQLMAP=$(command -v sqlmap >/dev/null 2>&1 && echo "installé")
+
+V_GO=$(go version 2>/dev/null | awk '{print $3}')
+V_NODE=$(node --version 2>/dev/null)
+V_JAVA=$(java -version 2>&1 | grep -oP '(?<=version ")[0-9][^"]*' | head -1)
+
 mkdir -p /var/www/html
 cat > /var/www/html/index.html << 'DASHBOARD_EOF'
 <!DOCTYPE html>
@@ -1156,7 +1199,7 @@ cat > /var/www/html/index.html << 'DASHBOARD_EOF'
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DevOps VM — Tableau de bord</title>
+<title>DevOps VM - Tableau de bord</title>
 <style>
   :root{
     --bg:#0a0b10; --panel:rgba(22,25,38,.6); --panel-solid:#161926;
@@ -1288,6 +1331,32 @@ cat > /var/www/html/index.html << 'DASHBOARD_EOF'
     border:1px dashed var(--border); border-radius:var(--radius); font-size:14px;
   }
 
+  .section-title{
+    font-size:15px; font-weight:600; color:var(--muted); text-transform:uppercase;
+    letter-spacing:.08em; margin:44px 0 16px; padding-top:8px; border-top:1px solid var(--border);
+  }
+
+  .tool-category{
+    background:var(--panel); border:1px solid var(--border); border-radius:var(--radius);
+    padding:16px 18px; margin-bottom:14px; backdrop-filter:blur(18px);
+    opacity:0; transform:translateY(12px); animation:fadeInUp .5s ease forwards;
+  }
+  .tool-category h3{
+    margin:0 0 12px; font-size:13.5px; font-weight:600; color:var(--accent-2);
+    display:flex; align-items:center; gap:8px;
+  }
+  .tool-category h3 .cat-dot{ width:7px; height:7px; border-radius:50%; background:var(--accent); }
+  .tool-list{ display:flex; flex-wrap:wrap; gap:8px; }
+  .tool-chip{
+    display:inline-flex; align-items:baseline; gap:6px; font-size:12.5px;
+    padding:6px 12px; border-radius:9px; background:rgba(255,255,255,.03); border:1px solid var(--border);
+    transition:border-color .2s ease, transform .2s ease;
+  }
+  .tool-chip:hover{ border-color:var(--border-hover); transform:translateY(-1px); }
+  .tool-chip .t-name{ font-weight:600; color:var(--text); }
+  .tool-chip .t-version{ color:var(--muted); font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px; }
+  .tool-chip.na{ opacity:.45; }
+
   @keyframes fadeInUp{ from{opacity:0; transform:translateY(16px);} to{opacity:1; transform:translateY(0);} }
   @keyframes blink{ 0%,100%{opacity:1;} 50%{opacity:.35;} }
   @keyframes pulse-ring{
@@ -1335,6 +1404,9 @@ cat > /var/www/html/index.html << 'DASHBOARD_EOF'
 
   <div class="grid" id="grid"></div>
 
+  <h2 class="section-title">Logiciels installés</h2>
+  <div id="tools-wrap"></div>
+
   <footer>
     Vérification d'état effectuée depuis votre navigateur, sans donnée envoyée à un tiers ·
     Identifiants générés par Terraform : <code>terraform output</code> ·
@@ -1343,7 +1415,7 @@ cat > /var/www/html/index.html << 'DASHBOARD_EOF'
 </div>
 
 <script>
-const PROFILE = "PLACEHOLDER_PROFILE";
+const PROFILE = PLACEHOLDER_PROFILE;
 const HOST = window.location.hostname;
 document.body.setAttribute("data-profile", PROFILE);
 
@@ -1366,6 +1438,50 @@ const SERVICES = [
     desc:"Notebooks Python / data science. Lien avec token déjà inclus." },
   { key:"vault", name:"Vault", port:8200, https:false, enabled:PLACEHOLDER_DEVOPS,
     desc:"Secrets management HashiCorp. Root token dans /root/.vault-init sur la VM." }
+];
+
+// Chaque outil : la version est celle réellement détectée sur CETTE VM au
+// moment de l'installation (chaîne vide si non installé / injoignable).
+// "enabled" reprend les mêmes conditions que cloud-init/install.sh
+// (should_run) : la liste affichée correspond exactement à ce qui a été
+// réellement installé pour le profil actif.
+const TOOLS = [
+  // Socle commun — toujours installé
+  { category:"Socle commun", name:"Docker", version:PLACEHOLDER_V_DOCKER, enabled:true },
+  { category:"Socle commun", name:"Git", version:PLACEHOLDER_V_GIT, enabled:true },
+  { category:"Socle commun", name:"Python 3", version:PLACEHOLDER_V_PYTHON, enabled:true },
+
+  // DevOps & Cloud — profil devops / fullstack
+  { category:"DevOps & Cloud", name:"kubectl", version:PLACEHOLDER_V_KUBECTL, enabled:PLACEHOLDER_DEVOPS },
+  { category:"DevOps & Cloud", name:"Helm", version:PLACEHOLDER_V_HELM, enabled:PLACEHOLDER_DEVOPS },
+  { category:"DevOps & Cloud", name:"k9s", version:PLACEHOLDER_V_K9S, enabled:PLACEHOLDER_DEVOPS },
+  { category:"DevOps & Cloud", name:"kind", version:PLACEHOLDER_V_KIND, enabled:PLACEHOLDER_DEVOPS },
+  { category:"DevOps & Cloud", name:"Terraform", version:PLACEHOLDER_V_TERRAFORM, enabled:PLACEHOLDER_DEVOPS },
+  { category:"DevOps & Cloud", name:"Terragrunt", version:PLACEHOLDER_V_TERRAGRUNT, enabled:PLACEHOLDER_DEVOPS },
+  { category:"DevOps & Cloud", name:"Packer", version:PLACEHOLDER_V_PACKER, enabled:PLACEHOLDER_DEVOPS },
+  { category:"DevOps & Cloud", name:"Ansible", version:PLACEHOLDER_V_ANSIBLE, enabled:PLACEHOLDER_DEVOPS },
+  { category:"DevOps & Cloud", name:"tflint", version:PLACEHOLDER_V_TFLINT, enabled:PLACEHOLDER_DEVOPS },
+  { category:"DevOps & Cloud", name:"Vault CLI", version:PLACEHOLDER_V_VAULT, enabled:PLACEHOLDER_DEVOPS },
+  { category:"DevOps & Cloud", name:"Azure CLI", version:PLACEHOLDER_V_AZCLI, enabled:PLACEHOLDER_DEVOPS },
+  { category:"DevOps & Cloud", name:"GitHub CLI", version:PLACEHOLDER_V_GHCLI, enabled:PLACEHOLDER_DEVOPS },
+  { category:"DevOps & Cloud", name:"ArgoCD CLI", version:PLACEHOLDER_V_ARGOCD, enabled:PLACEHOLDER_DEVOPS },
+  { category:"DevOps & Cloud", name:"Trivy", version:PLACEHOLDER_V_TRIVY, enabled:PLACEHOLDER_DEVOPS },
+
+  // Data & IA — profil dataops / fullstack
+  { category:"Data & IA", name:"JupyterLab", version:PLACEHOLDER_V_JUPYTER, enabled:PLACEHOLDER_DATAOPS },
+
+  // Cybersécurité — profil cybersecurity / fullstack
+  { category:"Cybersécurité", name:"Nuclei", version:PLACEHOLDER_V_NUCLEI, enabled:PLACEHOLDER_CYBER },
+  { category:"Cybersécurité", name:"Metasploit", version:PLACEHOLDER_V_METASPLOIT, enabled:PLACEHOLDER_CYBER },
+  { category:"Cybersécurité", name:"ffuf", version:PLACEHOLDER_V_FFUF, enabled:PLACEHOLDER_CYBER },
+  { category:"Cybersécurité", name:"gobuster", version:PLACEHOLDER_V_GOBUSTER, enabled:PLACEHOLDER_CYBER },
+  { category:"Cybersécurité", name:"Amass", version:PLACEHOLDER_V_AMASS, enabled:PLACEHOLDER_CYBER },
+  { category:"Cybersécurité", name:"sqlmap", version:PLACEHOLDER_V_SQLMAP, enabled:PLACEHOLDER_CYBER },
+
+  // Langages — profils devops et dataops
+  { category:"Langages", name:"Go", version:PLACEHOLDER_V_GO, enabled: (PLACEHOLDER_DEVOPS || PLACEHOLDER_DATAOPS) },
+  { category:"Langages", name:"Node.js", version:PLACEHOLDER_V_NODE, enabled: (PLACEHOLDER_DEVOPS || PLACEHOLDER_DATAOPS) },
+  { category:"Langages", name:"Java", version:PLACEHOLDER_V_JAVA, enabled: (PLACEHOLDER_DEVOPS || PLACEHOLDER_DATAOPS) }
 ];
 
 function buildUrl(s){
@@ -1440,6 +1556,43 @@ function tickClock(){
   if(el) el.textContent = new Date().toLocaleTimeString("fr-FR");
 }
 
+function escapeHtml(str){
+  const d = document.createElement("div");
+  d.textContent = str;
+  return d.innerHTML;
+}
+
+function renderTools(){
+  const wrap = document.getElementById("tools-wrap");
+  wrap.innerHTML = "";
+  const active = TOOLS.filter(t => t.enabled);
+
+  if(active.length === 0){
+    wrap.innerHTML = '<div class="empty">Aucun outil supplémentaire pour ce profil.</div>';
+    return;
+  }
+
+  const categories = [];
+  active.forEach(t => { if(!categories.includes(t.category)) categories.push(t.category); });
+
+  categories.forEach((cat, i) => {
+    const box = document.createElement("div");
+    box.className = "tool-category";
+    box.style.animationDelay = (i * 90) + "ms";
+
+    const list = active.filter(t => t.category === cat);
+    const chips = list.map(t => {
+      const v = (t.version || "").trim();
+      const cls = v ? "tool-chip" : "tool-chip na";
+      const versionHtml = v ? escapeHtml(v) : "—";
+      return `<span class="${cls}"><span class="t-name">${escapeHtml(t.name)}</span><span class="t-version">${versionHtml}</span></span>`;
+    }).join("");
+
+    box.innerHTML = `<h3><span class="cat-dot"></span>${escapeHtml(cat)}</h3><div class="tool-list">${chips}</div>`;
+    wrap.appendChild(box);
+  });
+}
+
 function render(){
   document.getElementById("profile-name").textContent = PROFILE;
   const grid = document.getElementById("grid");
@@ -1449,12 +1602,13 @@ function render(){
   if(active.length === 0){
     grid.innerHTML = '<div class="empty">Aucun service web pour ce profil.</div>';
     document.getElementById("count-badge").textContent = "0 service";
-    return;
+  } else {
+    active.forEach((s, i) => grid.appendChild(makeCard(s, i)));
+    updateCount(active);
+    setInterval(() => updateCount(active), 15000);
   }
 
-  active.forEach((s, i) => grid.appendChild(makeCard(s, i)));
-  updateCount(active);
-  setInterval(() => updateCount(active), 15000);
+  renderTools();
 
   tickClock();
   setInterval(tickClock, 1000);
@@ -1466,9 +1620,62 @@ render();
 </html>
 DASHBOARD_EOF
 
-# Substitution des valeurs de profil (évite tout risque d'échappement JS
-# dans le heredoc ci-dessus : on remplace ici, une fois le fichier écrit).
-sed -i "s/PLACEHOLDER_PROFILE/${VM_PROFILE}/g; s/PLACEHOLDER_DATAOPS/${DATAOPS_ON}/g; s/PLACEHOLDER_DEVOPS/${DEVOPS_ON}/g" /var/www/html/index.html
+# Substitution sûre des valeurs (profil, booléens, versions détectées) dans
+# le HTML généré. Utilise Python plutôt que sed : une version d'outil peut
+# contenir des guillemets ou des caractères spéciaux (ex. Java : la chaîne
+# brute contient des guillemets) qui casseraient une substitution sed/JS.
+# json.dumps() produit une chaîne JS toujours valide, quel que soit le
+# contenu — y compris une chaîne vide si l'outil n'est pas installé.
+PROFILE="$VM_PROFILE" \
+DATAOPS_ON="$DATAOPS_ON" DEVOPS_ON="$DEVOPS_ON" CYBER_ON="$CYBER_ON" \
+V_DOCKER="$V_DOCKER" V_GIT="$V_GIT" V_PYTHON="$V_PYTHON" \
+V_KUBECTL="$V_KUBECTL" V_HELM="$V_HELM" V_K9S="$V_K9S" V_KIND="$V_KIND" \
+V_TERRAFORM="$V_TERRAFORM" V_TERRAGRUNT="$V_TERRAGRUNT" V_PACKER="$V_PACKER" \
+V_ANSIBLE="$V_ANSIBLE" V_TFLINT="$V_TFLINT" V_VAULT="$V_VAULT" \
+V_AZCLI="$V_AZCLI" V_GHCLI="$V_GHCLI" V_ARGOCD="$V_ARGOCD" V_TRIVY="$V_TRIVY" \
+V_JUPYTER="$V_JUPYTER" \
+V_NUCLEI="$V_NUCLEI" V_METASPLOIT="$V_METASPLOIT" V_FFUF="$V_FFUF" \
+V_GOBUSTER="$V_GOBUSTER" V_AMASS="$V_AMASS" V_SQLMAP="$V_SQLMAP" \
+V_GO="$V_GO" V_NODE="$V_NODE" V_JAVA="$V_JAVA" \
+python3 - << 'PYEOF'
+import json, os
+
+path = "/var/www/html/index.html"
+with open(path) as f:
+    content = f.read()
+
+# Booléens : substitués tels quels (true/false), pas de guillemets JS.
+bool_map = {
+    "PLACEHOLDER_DATAOPS": os.environ.get("DATAOPS_ON", "false"),
+    "PLACEHOLDER_DEVOPS":  os.environ.get("DEVOPS_ON", "false"),
+    "PLACEHOLDER_CYBER":   os.environ.get("CYBER_ON", "false"),
+}
+for token, value in bool_map.items():
+    content = content.replace(token, value)
+
+# Chaînes : converties en littéral JS sûr via json.dumps (gère guillemets,
+# antislashs, chaîne vide, etc. sans jamais casser la syntaxe JS).
+string_vars = [
+    "PROFILE",
+    "V_DOCKER", "V_GIT", "V_PYTHON",
+    "V_KUBECTL", "V_HELM", "V_K9S", "V_KIND",
+    "V_TERRAFORM", "V_TERRAGRUNT", "V_PACKER", "V_ANSIBLE", "V_TFLINT",
+    "V_VAULT", "V_AZCLI", "V_GHCLI", "V_ARGOCD", "V_TRIVY",
+    "V_JUPYTER",
+    "V_NUCLEI", "V_METASPLOIT", "V_FFUF", "V_GOBUSTER", "V_AMASS", "V_SQLMAP",
+    "V_GO", "V_NODE", "V_JAVA",
+]
+for name in string_vars:
+    token = "PLACEHOLDER_" + name
+    value = os.environ.get(name, "") or ""
+    content = content.replace(token, json.dumps(value))
+
+with open(path, "w") as f:
+    f.write(content)
+
+remaining = content.count("PLACEHOLDER_")
+print(f"Dashboard généré ({remaining} placeholder(s) non substitué(s))")
+PYEOF
 
 systemctl enable --now nginx \
   && ok "Landing page de statut disponible sur http://<IP>/" \
