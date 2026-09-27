@@ -26,6 +26,10 @@ terraform {
       source  = "hashicorp/http"
       version = "~> 3.4"
     }
+    cloudinit = {
+      source  = "hashicorp/cloudinit"
+      version = "~> 2.3"
+    }
   }
 }
 
@@ -71,6 +75,25 @@ locals {
   # le retire pour ne pas avoir un deuxième "#!/bin/bash" au milieu du
   # script (inoffensif en bash, mais on préfère un fichier propre).
   install_script_body = join("\n", slice(split("\n", file("${path.module}/cloud-init/install.sh")), 1, length(split("\n", file("${path.module}/cloud-init/install.sh")))))
+}
+
+# ─── Cloud-init compressé ────────────────────────────────────
+# Le script d'installation complet (~40 outils) dépasse la limite Azure
+# de 64 Ko pour custom_data. Le provider cloudinit compresse le contenu
+# en Gzip avant encodage Base64, ce qui réduit typiquement la taille de
+# 70-80 % et permet de rester sous la limite.
+data "cloudinit_config" "vm_init" {
+  gzip          = true
+  base64_encode = true
+
+  part {
+    content_type = "text/x-shellscript"
+    filename     = "install.sh"
+    content = join("\n", [
+      local.cloud_init_header,
+      local.install_script_body
+    ])
+  }
 }
 
 # ─── Resource Group ──────────────────────────────────────────
@@ -202,9 +225,10 @@ resource "azurerm_linux_virtual_machine" "vm" {
     storage_account_uri = azurerm_storage_account.diag.primary_blob_endpoint
   }
 
-  # Injecte le script cloud-init, précédé d'un en-tête qui exporte les
-  # valeurs générées par Terraform (utilisateur, mots de passe, LUN).
-  custom_data = base64encode(join("\n", [local.cloud_init_header, local.install_script_body]))
+  # Injecte le script cloud-init compressé en Gzip et encodé en Base64.
+  # Le provider cloudinit gère automatiquement la compression, ce qui
+  # permet de rester sous la limite Azure de 64 Ko pour custom_data.
+  custom_data = data.cloudinit_config.vm_init.rendered
 
   tags = var.tags
 }
