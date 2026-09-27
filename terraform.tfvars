@@ -28,7 +28,7 @@ dns_servers           = ["8.8.8.8", "1.1.1.1"]
 # `terraform apply` (recommandé, aucune action requise).
 # Remplacez par une IP/CIDR explicite (ex: "90.12.34.56/32") si vous préférez
 # la figer, ou par "*" pour ouvrir à tout Internet (déconseillé).
-allowed_ssh_cidr = "auto"
+allowed_ssh_cidr = "203.0.113.45/32"
 
 tags = {
   Environment = "Dev"
