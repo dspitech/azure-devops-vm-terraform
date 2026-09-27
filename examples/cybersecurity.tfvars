@@ -2,12 +2,12 @@
 #  Profil CYBERSECURITY — Réseau, pentest offensif
 #  Usage : terraform apply -var-file="examples/cybersecurity.tfvars"
 #
-#  N'utilisez les outils de pentest installés que sur des cibles que
+#  ⚠️  N'utilisez les outils de pentest installés que sur des cibles que
 #      vous êtes autorisé(e) à tester (labs dédiés, environnements de TP).
 # =============================================================
 
 resource_group_name = "rg-cybersecurity-student"
-location             = "norwayeast"
+location             = "westeurope"
 
 vm_name        = "vm-cybersecurity"
 vm_size        = "Standard_B2ms"   # 2 vCPU / 8 GB RAM

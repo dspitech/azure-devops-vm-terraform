@@ -4,7 +4,7 @@
 # =============================================================
 
 resource_group_name = "rg-dataops-student"
-location             = "norwayeast"
+location             = "westeurope"
 
 vm_name        = "vm-dataops"
 vm_size        = "Standard_B2ms"   # 2 vCPU / 8 GB RAM — augmentez si gros datasets

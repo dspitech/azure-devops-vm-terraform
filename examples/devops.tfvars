@@ -4,7 +4,7 @@
 # =============================================================
 
 resource_group_name = "rg-devops-student"
-location             = "norwayeast"
+location             = "westeurope"
 
 vm_name        = "vm-devops"
 vm_size        = "Standard_B2ms"   # 2 vCPU / 8 GB RAM

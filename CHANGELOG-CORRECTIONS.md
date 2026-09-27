@@ -267,3 +267,78 @@ fichiers `examples/*.tfvars`. Désormais, la valeur de `terraform.tfvars`
 s'applique normalement même en passant un `-var-file` de profil ; en
 l'absence de `terraform.tfvars` personnalisé, le défaut `"auto"` de la
 variable s'applique toujours.
+
+---
+
+## Ajout ultérieur — Dépassement de la limite Azure "custom_data"
+
+**Erreur signalée** au moment du `terraform apply` :
+
+```
+Error: creating Linux Virtual Machine ...
+InvalidParameter: Custom data in OSProfile must be in Base64 encoding
+and with a maximum length of 87380 characters.
+```
+
+**Cause** : Azure limite le champ `custom_data` (le script cloud-init) à
+87380 caractères une fois encodé en base64. Après l'ajout du tableau de bord
+(HTML/CSS/JS) et de l'inventaire logiciel, `cloud-init/install.sh` avait
+grossi au point que sa version encodée en base64 (94 112 caractères)
+dépassait cette limite de 6 732 caractères.
+
+→ **Corrigé** en compressant le script en gzip avant l'encodage base64
+(`base64gzip(...)` au lieu de `base64encode(...)` dans `main.tf`) :
+cloud-init détecte et décompresse automatiquement un user-data gzippé au
+démarrage, sans configuration supplémentaire. Résultat : 27 936 caractères
+en base64, contre 94 112 avant — une marge confortable pour les évolutions
+futures du script.
+
+Une vérification (`lifecycle { precondition { ... } }`) a été ajoutée sur la
+ressource `azurerm_linux_virtual_machine.vm` : si le script venait un jour à
+dépasser à nouveau la limite malgré la compression, `terraform plan`/`apply`
+échoue immédiatement avec un message clair, plutôt que d'attendre l'erreur
+opaque de l'API Azure après plusieurs minutes de déploiement.
+
+---
+
+## Ajout ultérieur — Erreur d'encodage UTF-8 au démarrage de la VM
+
+**Erreur signalée**, dans `/var/log/cloud-init.log` :
+
+```
+UnicodeEncodeError: 'utf-8' codec can't encode character '\udce8' in
+position 380: surrogates not allowed
+```
+
+**Diagnostic** : `\udce8` est un caractère de substitution ("surrogate
+escape") que Python utilise pour représenter un octet invalide en UTF-8 —
+ici l'octet `0xE8`, qui correspond au caractère `è` encodé sur un seul octet
+(Latin-1 / Windows-1252) plutôt que sur deux octets comme l'exige l'UTF-8.
+Le fichier `cloud-init/install.sh` livré était pourtant valide en UTF-8 de
+bout en bout (vérifié). La corruption la plus probable intervient donc en
+aval : lors du transfert du fichier vers l'environnement de déploiement
+(dézippage sur Windows, upload vers Cloud Shell, etc.), un outil a
+réinterprété certains caractères accentués dans un encodage différent de
+l'UTF-8 d'origine, cassant l'intégrité du fichier avant même que Terraform
+ne le lise.
+
+**Correction adoptée** : plutôt que de corriger un octet précis (le
+problème peut resurgir avec n'importe quel autre accent selon l'outil de
+transfert utilisé), `cloud-init/install.sh` a été entièrement converti en
+**ASCII pur** — plus aucun caractère accentué, aucun caractère de dessin de
+boîte (`═`, `║`, `╔`...) ni aucun emoji dans le fichier. Ces caractères
+n'avaient qu'un rôle décoratif (MOTD, bannières, messages) ; leur suppression
+n'a aucun impact fonctionnel. Cette conversion élimine complètement la
+classe de bug : un fichier 100% ASCII est représenté de façon identique
+dans absolument tous les encodages (UTF-8, Latin-1, Windows-1252, ASCII),
+donc aucun outil de transfert ne peut plus le corrompre.
+
+Le README, le CHANGELOG et les commentaires des fichiers `.tf` conservent
+l'accentuation française normale : seul `cloud-init/install.sh` (le seul
+fichier réellement exécuté sur la VM via cloud-init) est concerné par cette
+contrainte.
+
+Validation : `python3 -c "open(...).read().encode('ascii')"` confirme 0
+octet non-ASCII restant ; `bash -n` et `shellcheck -S error` ne remontent
+aucune erreur ; le bloc HTML/CSS/JS du tableau de bord a été ré-extrait et
+revalidé (`node --check`, parsing HTML) après la conversion.

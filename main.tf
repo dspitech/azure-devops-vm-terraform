@@ -26,10 +26,6 @@ terraform {
       source  = "hashicorp/http"
       version = "~> 3.4"
     }
-    cloudinit = {
-      source  = "hashicorp/cloudinit"
-      version = "~> 2.3"
-    }
   }
 }
 
@@ -75,25 +71,6 @@ locals {
   # le retire pour ne pas avoir un deuxième "#!/bin/bash" au milieu du
   # script (inoffensif en bash, mais on préfère un fichier propre).
   install_script_body = join("\n", slice(split("\n", file("${path.module}/cloud-init/install.sh")), 1, length(split("\n", file("${path.module}/cloud-init/install.sh")))))
-}
-
-# ─── Cloud-init compressé ────────────────────────────────────
-# Le script d'installation complet (~40 outils) dépasse la limite Azure
-# de 64 Ko pour custom_data. Le provider cloudinit compresse le contenu
-# en Gzip avant encodage Base64, ce qui réduit typiquement la taille de
-# 70-80 % et permet de rester sous la limite.
-data "cloudinit_config" "vm_init" {
-  gzip          = true
-  base64_encode = true
-
-  part {
-    content_type = "text/x-shellscript"
-    filename     = "install.sh"
-    content = join("\n", [
-      local.cloud_init_header,
-      local.install_script_body
-    ])
-  }
 }
 
 # ─── Resource Group ──────────────────────────────────────────
@@ -225,12 +202,28 @@ resource "azurerm_linux_virtual_machine" "vm" {
     storage_account_uri = azurerm_storage_account.diag.primary_blob_endpoint
   }
 
-  # Injecte le script cloud-init compressé en Gzip et encodé en Base64.
-  # Le provider cloudinit gère automatiquement la compression, ce qui
-  # permet de rester sous la limite Azure de 64 Ko pour custom_data.
-  custom_data = data.cloudinit_config.vm_init.rendered
+  # Injecte le script cloud-init, précédé d'un en-tête qui exporte les
+  # valeurs générées par Terraform (utilisateur, mots de passe, LUN).
+  # Compressé en gzip : Azure limite "custom_data" à 87380 caractères une
+  # fois encodé en base64, et le script complet (dashboard inclus) dépasse
+  # cette limite en clair. cloud-init détecte et décompresse automatiquement
+  # un user-data gzippé au démarrage — aucune configuration supplémentaire
+  # n'est nécessaire côté VM.
+  custom_data = base64gzip(join("\n", [local.cloud_init_header, local.install_script_body]))
 
   tags = var.tags
+
+  lifecycle {
+    precondition {
+      # Azure limite "custom_data" à 87380 caractères une fois encodé en
+      # base64. Avec la compression gzip ci-dessus, cette limite laisse
+      # une large marge — cette vérification échoue tôt et clairement au
+      # lieu d'un "400 Bad Request" opaque côté API Azure après plusieurs
+      # minutes de déploiement, si le script venait à beaucoup grossir.
+      condition     = length(base64gzip(join("\n", [local.cloud_init_header, local.install_script_body]))) <= 87380
+      error_message = "Le script cloud-init compressé dépasse la limite Azure de 87380 caractères (custom_data en base64). Réduisez cloud-init/install.sh (ou simplifiez le tableau de bord généré en phase 12) avant de redéployer."
+    }
+  }
 }
 
 # ─── Extra Data Disk (100 GB for projects/data) ──────────────

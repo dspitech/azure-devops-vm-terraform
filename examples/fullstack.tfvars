@@ -6,7 +6,7 @@
 # =============================================================
 
 resource_group_name = "rg-devops-pro-vm"
-location             = "norwayeast"
+location             = "westeurope"
 
 vm_name        = "devops-pro-vm"
 vm_size        = "Standard_B2ms"   # 2 vCPU / 8 GB RAM
