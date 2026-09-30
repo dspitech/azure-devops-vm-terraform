@@ -1,4 +1,4 @@
-# DevOps VM — Azure Students
+# DevOps VM - Azure Students 
 
 <div align="center">
 
@@ -68,7 +68,7 @@ base UFW/fail2ban) est **toujours installé**, quel que soit le profil.
 | `cybersecurity` | Étudiants Cybersécurité / Pentest | Outils réseau (masscan, tshark, VPN), Nuclei, ffuf, gobuster, Amass, theHarvester, Metasploit, Hydra, sqlmap, John the Ripper, wordlists |
 | `fullstack` (défaut) | Formation généraliste, labo tout-en-un | Tout ce qui précède, réuni |
 
-**Déployer un profil précis** — un fichier d'exemple prêt à l'emploi existe pour chacun dans `examples/` :
+**Déployer un profil précis** - un fichier d'exemple prêt à l'emploi existe pour chacun dans `examples/` :
 
 ```bash
 terraform apply -var-file="examples/devops.tfvars"
@@ -77,7 +77,7 @@ terraform apply -var-file="examples/devops.tfvars"
 
 > Ces fichiers ne fixent volontairement **pas** `allowed_ssh_cidr` : si vous
 > l'avez déjà défini dans votre propre `terraform.tfvars` (ex. votre IP
-> réelle), cette valeur s'applique automatiquement — Terraform charge
+> réelle), cette valeur s'applique automatiquement - Terraform charge
 > `terraform.tfvars` en premier, puis complète avec le fichier `-var-file`
 > pour tout ce qu'il ne définit pas. Sans `terraform.tfvars` personnalisé,
 > la détection automatique (`"auto"`) s'applique par défaut.
@@ -147,7 +147,7 @@ Les variables se définissent dans `terraform.tfvars`. Voici les principales :
 | `location` | `westeurope` | Région Azure de déploiement |
 | `vm_size` | `Standard_B2ms` | Taille de la VM (2 vCPU / 8 GB RAM) |
 | `admin_username` | `devopsadmin` | Nom de l'utilisateur SSH |
-| `vm_profile` | `"fullstack"` | `"devops"` \| `"dataops"` \| `"cybersecurity"` \| `"fullstack"` — voir la section [Profils étudiants](#profils-étudiants-vm_profile) |
+| `vm_profile` | `"fullstack"` | `"devops"` \| `"dataops"` \| `"cybersecurity"` \| `"fullstack"` - voir la section [Profils étudiants](#profils-étudiants-vm_profile) |
 | `os_disk_size_gb` | `64` | Taille du disque OS en GB |
 | `data_disk_size_gb` | `64` | Taille du disque de données en GB |
 | `vnet_address_space` | `10.0.0.0/16` | Plage d'adresses du réseau virtuel |
@@ -201,15 +201,15 @@ Le déploiement repose sur 5 fichiers Terraform et un script cloud-init, chacun 
 | `provider.tf` | Déclare les providers utilisés (AzureRM, random, tls, local, http) et leurs versions minimales. |
 | `variables.tf` | Déclare toutes les variables d'entrée (taille de VM, réseau, `vm_profile`, `allowed_ssh_cidr`...) avec valeurs par défaut et validations. |
 | `main.tf` | Crée la VM, les disques, la clé SSH (générée), les mots de passe (Grafana/Jupyter/Portainer, générés), détecte l'IP publique du déployeur, et injecte tout ça dans le script cloud-init. |
-| `network.tf` | VNet, Subnet, IP publique, NSG — les règles de pare-feu s'adaptent automatiquement au profil choisi (`vm_profile`). |
+| `network.tf` | VNet, Subnet, IP publique, NSG - les règles de pare-feu s'adaptent automatiquement au profil choisi (`vm_profile`). |
 | `outputs.tf` | Toutes les valeurs utiles après déploiement : IP, commande SSH, URLs des services, mots de passe générés (marqués `sensitive`). |
 | `cloud-init/install.sh` | Exécuté au premier démarrage de la VM. Installe et configure les outils en 13 phases, en sautant celles qui ne concernent pas le profil actif. |
 
 **Décisions de conception clés :**
 
 - **Rien à saisir à la main** : l'IP publique du déployeur est détectée automatiquement (`allowed_ssh_cidr = "auto"`), et les mots de passe de Grafana/Jupyter/Portainer sont générés par Terraform plutôt que codés en dur.
-- **Résilience** : `install.sh` continue même si un outil isolé échoue à s'installer (ex : rate-limit temporaire d'une API tierce) — chaque étape est indépendante et journalisée dans `/var/log/devops-install.log`.
-- **Profils** : un seul jeu de fichiers Terraform, un seul script cloud-init — le comportement s'adapte via la variable `vm_profile` plutôt que via des branches de code séparées.
+- **Résilience** : `install.sh` continue même si un outil isolé échoue à s'installer (ex : rate-limit temporaire d'une API tierce) - chaque étape est indépendante et journalisée dans `/var/log/devops-install.log`.
+- **Profils** : un seul jeu de fichiers Terraform, un seul script cloud-init - le comportement s'adapte via la variable `vm_profile` plutôt que via des branches de code séparées.
 - **Visibilité** : un tableau de bord web (`http://<IP>/`) et une commande `devops-status` en SSH donnent à tout moment une vue claire de ce qui est installé et de son état.
 
 > L'historique détaillé des choix techniques et des corrections apportées au projet est disponible dans [`CHANGELOG-CORRECTIONS.md`](./CHANGELOG-CORRECTIONS.md).
@@ -223,7 +223,7 @@ Le déploiement repose sur 5 fichiers Terraform et un script cloud-init, chacun 
 Lancer le cloud Shell depuis le portal Azure et choisir PowerShell.
 
 > ⚠️ **Piège fréquent avec Cloud Shell** : `allowed_ssh_cidr = "auto"`
-> détecte l'IP de la machine qui exécute `terraform apply` — donc celle de
+> détecte l'IP de la machine qui exécute `terraform apply` - donc celle de
 > **Cloud Shell**, pas celle de votre PC. Si vous déployez depuis Cloud
 > Shell, SSH fonctionnera depuis Cloud Shell, mais votre navigateur (sur un
 > réseau différent) sera bloqué par le NSG sur tous les services (dashboard
@@ -245,7 +245,7 @@ nano terraform.tfvars                          # Éditez selon vos besoins (opti
 
 > **Choisir un profil** : `terraform.tfvars` déploie par défaut le profil
 > `"fullstack"` (tous les outils). Pour un profil ciblé, utilisez directement
-> un des fichiers de `examples/` — voir [Profils étudiants](#profils-étudiants-vm_profile) :
+> un des fichiers de `examples/` - voir [Profils étudiants](#profils-étudiants-vm_profile) :
 > `terraform apply -var-file="examples/dataops.tfvars"` (étape 3 ci-dessous).
 
 ### 3. Déployer
@@ -294,7 +294,7 @@ devops-status
 
 ### 5. Accéder aux services
 
-**Le plus simple : ouvrez le tableau de bord** — `terraform output dashboard_url`
+**Le plus simple : ouvrez le tableau de bord** - `terraform output dashboard_url`
 (ou directement `http://<IP>/`). Il affiche le profil actif de la VM, un lien
 « Ouvrir » + « Copier le lien » pour chaque service réellement installé, et
 un indicateur d'état en direct (vert = joignable, rouge = injoignable),
@@ -310,7 +310,7 @@ Sinon, les services sont accessibles directement (remplacer `<IP>` par l'IP publ
 | Portainer | https://\<IP\>:9443 | `admin` / mot de passe généré → `terraform output portainer_admin_password` (compte déjà initialisé, aucune action requise) | tous |
 | Vault UI | http://\<IP\>:8200/ui | Root token dans `/root/.vault-init` sur la VM | `devops` / `fullstack` |
 
-> **Sécurité** : tous ces ports sont restreints par défaut à l'IP publique détectée automatiquement au moment du `terraform apply` (`allowed_ssh_cidr = "auto"`), à l'exception du tableau de bord (port 80) qui est volontairement public — il n'affiche que des liens et un inventaire des logiciels installés (versions), aucun secret ni information sensible. Si votre IP change ensuite, mettez à jour `terraform.tfvars` avec la nouvelle IP (ou ré-appliquez pour redétecter) puis relancez `terraform apply`.
+> **Sécurité** : tous ces ports sont restreints par défaut à l'IP publique détectée automatiquement au moment du `terraform apply` (`allowed_ssh_cidr = "auto"`), à l'exception du tableau de bord (port 80) qui est volontairement public - il n'affiche que des liens et un inventaire des logiciels installés (versions), aucun secret ni information sensible. Si votre IP change ensuite, mettez à jour `terraform.tfvars` avec la nouvelle IP (ou ré-appliquez pour redétecter) puis relancez `terraform apply`.
 
 ---
 
@@ -318,7 +318,7 @@ Sinon, les services sont accessibles directement (remplacer `<IP>` par l'IP publ
 
 > La liste ci-dessous correspond au profil `fullstack` (tout installé). Avec
 > un profil ciblé (`devops`/`dataops`/`cybersecurity`), seuls le socle commun
-> et les outils de ce profil sont installés — voir le tableau de la section
+> et les outils de ce profil sont installés - voir le tableau de la section
 > [Profils étudiants](#profils-étudiants-vm_profile).
 
 ### Containers et Orchestration
@@ -459,7 +459,7 @@ Répertoire de travail dédié : `/data/pentest/{recon,exploits,reports,loot}`
 
 > L'accès SSH et les outils sensibles sont restreints **automatiquement** à
 > l'IP publique du déployeur (`allowed_ssh_cidr = "auto"`, valeur par
-> défaut) — aucune manipulation requise. Voir `terraform output
+> défaut) - aucune manipulation requise. Voir `terraform output
 > allowed_ssh_cidr_effective` pour vérifier la valeur retenue.
 
 Récapitulatif des règles NSG définies dans `network.tf` (le port ouvert
@@ -468,7 +468,7 @@ dépend parfois du profil `vm_profile` choisi) :
 | Priorité | Port(s) | Service | Source autorisée | Profil requis |
 |---|---|---|---|---|
 | 100 | 22 | SSH | `allowed_ssh_cidr` (auto-détecté) | tous |
-| 110 | 80 | HTTP — tableau de bord de statut | Tout (`*`) — volontairement public, ne montre que des liens | tous |
+| 110 | 80 | HTTP - tableau de bord de statut | Tout (`*`) - volontairement public, ne montre que des liens | tous |
 | 120 | 443 | HTTPS (réservé) | Tout (`*`) | tous |
 | 130 | 8888 | JupyterLab | `allowed_ssh_cidr` | `dataops` / `fullstack` |
 | 140 | 3000 | Grafana | `allowed_ssh_cidr` | tous |
@@ -484,7 +484,7 @@ dépend parfois du profil `vm_profile` choisi) :
 **Autres protections en place** :
 
 - **fail2ban** : bannissement automatique après 5 tentatives SSH infructueuses.
-- **Identifiants générés** : Grafana, Jupyter et Portainer n'utilisent jamais de mot de passe par défaut — tous générés aléatoirement par Terraform (`random_password`), récupérables via `terraform output` (marqués `sensitive`).
+- **Identifiants générés** : Grafana, Jupyter et Portainer n'utilisent jamais de mot de passe par défaut - tous générés aléatoirement par Terraform (`random_password`), récupérables via `terraform output` (marqués `sensitive`).
 - **Clé SSH** : générée par Terraform (`tls_private_key`), jamais transmise en clair ; le dossier `keys/` est exclu de git par `.gitignore`.
 - **Vault** : initialisé et scellé (unseal) automatiquement au premier démarrage ; root token dans `/root/.vault-init` (permissions 750).
 
@@ -537,13 +537,13 @@ dépend parfois du profil `vm_profile` choisi) :
 - **ufw** : Pare-feu applicatif configuré (aligné sur NSG Azure)
 - **Vault** : Initialisé automatiquement, root token dans `/root/.vault-init` (750)
 - **Docker** : groupe `docker` ajouté à `devopsadmin` (accès sans sudo)
-- **Identifiants** : Grafana, Jupyter et Portainer utilisent tous des identifiants **générés aléatoirement par Terraform** (plus de mot de passe par défaut) — récupérables via `terraform output`. Vault utilise son root token généré à l'initialisation.
+- **Identifiants** : Grafana, Jupyter et Portainer utilisent tous des identifiants **générés aléatoirement par Terraform** (plus de mot de passe par défaut) - récupérables via `terraform output`. Vault utilise son root token généré à l'initialisation.
 
 ###  Exemple de trace d'exécution (profil `dataops`)
 
 ```log
 ==============================================================
-  DevOps Pro VM — Installation démarrée
+  DevOps Pro VM - Installation démarrée
   Fri Sep 26 22:10:03 UTC 2026
 ==============================================================
    [0/12] Système mis à jour
@@ -778,7 +778,7 @@ fi
 Si l'outil ne concerne qu'un profil précis, encadrez le bloc avec `if
 should_run "devops"; then ... else skip_msg "..."; fi` (voir les phases 4, 5,
 6, 8, 10b et 11 du script pour des exemples). `gh_latest` gère déjà les
-retries en cas de rate-limit de l'API GitHub — préférez-le à un appel `curl`
+retries en cas de rate-limit de l'API GitHub - préférez-le à un appel `curl`
 direct vers `api.github.com`.
 
 N'oubliez pas de l'ajouter dans `devops-status`, dans le tableau de bord
@@ -788,5 +788,5 @@ N'oubliez pas de l'ajouter dans `devops-status`, dans le tableau de bord
 
 ## Auteur
 
-**Pape Lo** — [pape.lo@estiam.com](mailto:pape.lo@estiam.com)
+**Pape Lo** - [pape.lo@estiam.com](mailto:pape.lo@estiam.com)
 
