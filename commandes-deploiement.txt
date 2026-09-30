@@ -9,20 +9,18 @@ az account set --subscription "Azure for Students"
 
 2) Récupérer le projet
 -------------------------------------------------------------
-git clone https://github.com/dspitech/azure-devops-vm-terraform.git
-cd azure-devops-vm-terraform
+git clone https://github.com/dspitech/azure-devops-vm-terraform.git && cd azure-devops-vm-terraform
 
 3) Initialiser Terraform
 -------------------------------------------------------------
-terraform fmt
-terraform init
-terraform validate
+terraform fmt && terraform init && terraform validate && terraform plan && terraform apply -auto-approve
+
 
 4) Déployer
 -------------------------------------------------------------
 # Option A - profil défini dans terraform.tfvars (fullstack par défaut) :
-terraform plan
-terraform apply -auto-approve
+
+terraform fmt && terraform init && terraform validate && terraform plan && terraform apply -auto-approve
 
 # Option B - profil ciblé, un seul à la fois (voir section 5 ci-dessous)
 
@@ -37,22 +35,22 @@ terraform apply -auto-approve
 # vous l'avez déjà définie ; sinon elle est détectée automatiquement.
 
 # --- DevOps (Kubernetes, IaC, CI/CD) ---
-terraform apply -auto-approve -var-file="examples/devops.tfvars"
+terraform fmt && terraform init && terraform validate && terraform plan && terraform apply -auto-approve -var-file="examples/devops.tfvars"
 terraform output dashboard_url
 terraform destroy -auto-approve -var-file="examples/devops.tfvars"
 
 # --- DataOps (JupyterLab, Python data science) ---
-terraform apply -auto-approve -var-file="examples/dataops.tfvars"
+terraform fmt && terraform init && terraform validate && terraform plan && terraform apply -auto-approve -var-file="examples/dataops.tfvars"
 terraform output dashboard_url
 terraform destroy -auto-approve -var-file="examples/dataops.tfvars"
 
 # --- Cybersécurité (réseau, pentest offensif) ---
-terraform apply -auto-approve -var-file="examples/cybersecurity.tfvars"
+terraform fmt && terraform init && terraform validate && terraform plan && terraform apply -auto-approve -var-file="examples/cybersecurity.tfvars"
 terraform output dashboard_url
 terraform destroy -auto-approve -var-file="examples/cybersecurity.tfvars"
 
 # --- Fullstack (tout réuni) ---
-terraform apply -auto-approve -var-file="examples/fullstack.tfvars"
+terraform fmt && terraform init && terraform validate && terraform plan && terraform apply -auto-approve -var-file="examples/fullstack.tfvars"
 terraform output dashboard_url
 terraform destroy -auto-approve -var-file="examples/fullstack.tfvars"
 
@@ -76,7 +74,9 @@ terraform output allowed_ssh_cidr_effective
 7) Se connecter en SSH
 -------------------------------------------------------------
 # Télécharger la clé privée générée (ex. depuis Azure Cloud Shell) :
-download ./keys/<vm_name>_id_rsa
+download ./keys/devops-pro-vm_id_rsa
+
+download ./keys/vm-cybersecurity_id_rsa 
 
 # Puis se connecter (adapter le chemin de la clé et l'IP) :
 ssh -i ./keys/<vm_name>_id_rsa devopsadmin@<IP_PUBLIQUE>
