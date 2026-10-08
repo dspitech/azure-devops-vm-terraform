@@ -11,12 +11,7 @@ az account set --subscription "Azure for Students"
 -------------------------------------------------------------
 git clone https://github.com/dspitech/azure-devops-vm-terraform.git && cd azure-devops-vm-terraform
 
-3) Initialiser Terraform
--------------------------------------------------------------
-terraform fmt && terraform init && terraform validate && terraform plan && terraform apply -auto-approve
-
-
-4) Déployer
+3) Déployer
 -------------------------------------------------------------
 # Option A - profil défini dans terraform.tfvars (fullstack par défaut) :
 
