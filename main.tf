@@ -70,7 +70,11 @@ locals {
   # Le fichier install.sh a lui-même un shebang en première ligne ; on
   # le retire pour ne pas avoir un deuxième "#!/bin/bash" au milieu du
   # script (inoffensif en bash, mais on préfère un fichier propre).
-  install_script_body = join("\n", slice(split("\n", file("${path.module}/cloud-init/install.sh")), 1, length(split("\n", file("${path.module}/cloud-init/install.sh")))))
+  # replace() force des fins de ligne LF meme si le fichier a ete extrait
+  # avec CRLF (Windows / git autocrlf) : un \r dans un script bash casse
+  # les heredocs, les "fi" et les noms de commandes sur la VM.
+  install_script_raw  = replace(file("${path.module}/cloud-init/install.sh"), "\r\n", "\n")
+  install_script_body = join("\n", slice(split("\n", local.install_script_raw), 1, length(split("\n", local.install_script_raw))))
 }
 
 # ─── Resource Group ──────────────────────────────────────────
@@ -215,6 +219,14 @@ resource "azurerm_linux_virtual_machine" "vm" {
 
   lifecycle {
     precondition {
+      # Le profil "fullstack" installe les 4 familles d'outils (devops + dataops
+      # + cybersecurity + socle) : Docker, k3s/kind, Jupyter, MinIO, Metasploit,
+      # etc. tournent simultanément. En dessous de 8 Go de RAM (B2s), la VM
+      # swappe fortement voire tue des services via l'OOM killer.
+      condition     = var.vm_profile != "fullstack" || contains(["Standard_B2ms", "Standard_B4ms", "Standard_B8ms", "Standard_D2s_v5", "Standard_D4s_v5"], var.vm_size)
+      error_message = "Le profil \"fullstack\" installe simultanement tous les outils (devops+dataops+cybersecurity) : prevoyez au moins 8 Go de RAM (Standard_B2ms ou plus), pas Standard_B2s/B1s. Changez vm_size ou choisissez un profil unique."
+    }
+    precondition {
       # Azure limite "custom_data" à 87380 caractères une fois encodé en
       # base64. Avec la compression gzip ci-dessus, cette limite laisse
       # une large marge — cette vérification échoue tôt et clairement au
@@ -224,6 +236,22 @@ resource "azurerm_linux_virtual_machine" "vm" {
       error_message = "Le script cloud-init compressé dépasse la limite Azure de 87380 caractères (custom_data en base64). Réduisez cloud-init/install.sh (ou simplifiez le tableau de bord généré en phase 12) avant de redéployer."
     }
   }
+}
+
+# ─── Arret automatique quotidien (protege le credit Azure Students) ──
+resource "azurerm_dev_test_global_vm_shutdown_schedule" "vm" {
+  count              = var.auto_shutdown_enabled ? 1 : 0
+  virtual_machine_id = azurerm_linux_virtual_machine.vm.id
+  location            = azurerm_resource_group.rg.location
+  enabled             = true
+  daily_recurrence_time = var.auto_shutdown_time
+  timezone               = var.auto_shutdown_timezone
+
+  notification_settings {
+    enabled = false
+  }
+
+  tags = var.tags
 }
 
 # ─── Extra Data Disk (100 GB for projects/data) ──────────────

@@ -62,9 +62,23 @@ output "portainer_url" {
 }
 
 output "portainer_admin_password" {
-  description = "Mot de passe admin Portainer, initialisé automatiquement (utilisateur: admin)"
+  description = "Mot de passe admin Portainer, initialisé automatiquement (utilisateur: admin). Réutilisé comme mot de passe pour code-server, MinIO (minioadmin) et pgAdmin (admin@devops-vm.local)."
   value       = random_password.portainer.result
   sensitive   = true
+}
+
+output "auto_shutdown_info" {
+  description = "Rappel de l'heure d'arrêt automatique quotidien de la VM (protège le crédit Azure Students)"
+  value       = var.auto_shutdown_enabled ? "VM arrêtée automatiquement chaque jour à ${var.auto_shutdown_time} (${var.auto_shutdown_timezone})" : "Arrêt automatique désactivé (auto_shutdown_enabled = false)"
+}
+
+output "tunnel_only_services" {
+  description = "Services volontairement liés à 127.0.0.1 (non exposés par le NSG) : accès via tunnel SSH, ex. `ssh -L 8443:localhost:8443 -i keys/<vm>_id_rsa <user>@<ip>`"
+  value = join(", ", [
+    "code-server:8443", "MinIO console:9001", "Metabase:3001", "pgAdmin:5050",
+    "Redpanda:9092", "cAdvisor:8085", "Loki:3100", "CyberChef:8001",
+    "DVWA:8081 (cybersecurity/fullstack)", "Juice Shop:8082 (cybersecurity/fullstack)", "WebGoat:8083 (cybersecurity/fullstack)"
+  ])
 }
 
 output "allowed_ssh_cidr_effective" {

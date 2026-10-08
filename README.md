@@ -26,6 +26,7 @@
 - [Architecture](#architecture)
 - [Démarrage rapide](#démarrage-rapide)
 - [Accéder aux services](#5-accéder-aux-services)
+- [Services en tunnel SSH uniquement](#services-en-tunnel-ssh-uniquement-non-exposés-dans-le-nsg)
 - [Logiciels installés automatiquement](#logiciels-installés-automatiquement)
 - [Sécurité et réseau](#sécurité-et-réseau)
 - [Coût estimé](#coût-estimé-azure-students--100an-de-crédit)
@@ -45,10 +46,11 @@ Ce projet s'adresse aux étudiants et aux professionnels qui souhaitent disposer
 
 En quelques minutes, Terraform déploie sur Azure une machine virtuelle Ubuntu 22.04 LTS entièrement préconfigurée, couvrant les besoins suivants :
 
-- **DevOps et CI/CD** : Docker, Kubernetes, Terraform, Ansible, Vault, ArgoCD, GitHub Actions et bien d'autres.
-- **Pentest et sécurité offensive** : Metasploit, Nuclei, ffuf, sqlmap, Hydra, Amass et un répertoire de travail dédié.
-- **DataOps et Data Science** : JupyterLab, Spark, dbt, pandas, scikit-learn et les principaux SDKs cloud.
-- **SRE et monitoring** : Prometheus, Grafana, Node Exporter, Trivy et fail2ban préconfigurés.
+- **DevOps et CI/CD** : Docker, Kubernetes (kubectl/Helm/k9s/kind/k3s), Terraform, Ansible, Vault, ArgoCD, GitHub Actions, sécurité IaC (Checkov/tfsec/gitleaks/semgrep) et bien d'autres.
+- **Pentest et sécurité offensive** : Metasploit, Nuclei, ffuf, sqlmap, Hydra, Amass, suite ProjectDiscovery, et des cibles d'entraînement (DVWA, Juice Shop, WebGoat) isolées en tunnel SSH.
+- **DataOps et Data Science** : JupyterLab, Spark, dbt, pandas, scikit-learn, DuckDB, Streamlit, MinIO, Metabase et les principaux SDKs cloud.
+- **SRE et monitoring** : Prometheus, Grafana, Loki/Promtail, cAdvisor, Node Exporter, Trivy et fail2ban préconfigurés.
+- **Productivité** : code-server (VS Code web), lazygit/lazydocker, et un tableau de bord web qui s'adapte automatiquement au profil choisi.
 
 Que vous soyez en cours de formation, en stage ou en poste, cette VM vous permet de démarrer immédiatement sur un environnement standardisé, reproductible et prêt pour des cas d'usage réels. L'installation est **résiliente** : si un outil isolé échoue à s'installer (indisponibilité ponctuelle d'une API tierce, par exemple), le reste de l'installation continue et va jusqu'au bout.
 
@@ -63,10 +65,20 @@ base UFW/fail2ban) est **toujours installé**, quel que soit le profil.
 
 | Profil | Pour qui | Outils ajoutés au socle commun |
 |---|---|---|
-| `devops` | Étudiants DevOps / Cloud / SRE | Kubernetes (kubectl, Helm, k9s, kind), Terraform/Terragrunt/Packer/Ansible, CI/CD (Azure CLI, GitHub CLI, ArgoCD, act, Vault, Skaffold, Stern, cosign), Trivy/Hadolint, Go/Node.js/Rust/Java |
-| `dataops` | Étudiants Data / IA / ML | JupyterLab, pandas/polars/numpy/scikit-learn/xgboost/mlflow, dbt-core, PySpark, Dask, FastAPI, Go/Node.js/Rust/Java |
-| `cybersecurity` | Étudiants Cybersécurité / Pentest | Outils réseau (masscan, tshark, VPN), Nuclei, ffuf, gobuster, Amass, theHarvester, Metasploit, Hydra, sqlmap, John the Ripper, wordlists |
+| `devops` | Étudiants DevOps / Cloud / SRE | Kubernetes (kubectl, Helm, k9s, kind, k3s, kustomize, kubeconform, popeye), Terraform/Terragrunt/Packer/Ansible + sécurité IaC (Checkov, tfsec, gitleaks, semgrep, conftest, terraform-docs, infracost), CI/CD (Azure CLI, AWS CLI, gcloud, GitHub CLI, ArgoCD, act, Vault, Skaffold, Stern, cosign), Trivy/Hadolint, dive/ctop, Go/Node.js/Rust/Java |
+| `dataops` | Étudiants Data / IA / ML | JupyterLab, pandas/polars/numpy/scikit-learn/xgboost/mlflow, DuckDB, Streamlit, DVC, Great Expectations, Prefect, dbt-core, PySpark, Dask, FastAPI, MinIO, Metabase, pgAdmin, Redpanda, Go/Node.js/Rust/Java |
+| `cybersecurity` | Étudiants Cybersécurité / Pentest | Recon (subfinder, httpx, naabu, dnsx, katana, feroxbuster, whatweb), Nuclei, ffuf, gobuster, Amass, theHarvester, wpscan, OWASP ZAP, Metasploit, Hydra, sqlmap, John the Ripper, impacket, NetExec, binwalk, radare2, volatility3, CyberChef, cibles d'entraînement (DVWA, Juice Shop, WebGoat), outils de défense (Lynis, ClamAV, auditd, osquery, CrowdSec), wordlists |
 | `fullstack` (défaut) | Formation généraliste, labo tout-en-un | Tout ce qui précède, réuni |
+
+> Le socle commun inclut aussi, depuis la dernière mise à jour : code-server
+> (VS Code dans le navigateur), lazygit, lazydocker, btop, ncdu, direnv,
+> pre-commit, tldr, restic, unattended-upgrades, et une stack de logs
+> Loki/Promtail + cAdvisor en complément de Prometheus/Grafana.
+>
+> ⚠️ Le profil `fullstack` installe les 4 familles d'outils **simultanément** :
+> prévoyez au moins 8 Go de RAM (`Standard_B2ms` ou plus). Une
+> `precondition` Terraform bloque le déploiement si vous choisissez
+> `fullstack` avec une VM plus petite (`Standard_B2s`/`B1s`).
 
 **Déployer un profil précis** - un fichier d'exemple prêt à l'emploi existe pour chacun dans `examples/` :
 
@@ -153,6 +165,9 @@ Les variables se définissent dans `terraform.tfvars`. Voici les principales :
 | `vnet_address_space` | `10.0.0.0/16` | Plage d'adresses du réseau virtuel |
 | `subnet_address_prefix` | `10.0.1.0/24` | Plage d'adresses du sous-réseau |
 | `allowed_ssh_cidr` | `"auto"` | IP publique du déployeur, détectée **automatiquement** (aucune saisie requise). Une valeur explicite (`"90.x.x.x/32"`) ou `"*"` restent possibles. |
+| `auto_shutdown_enabled` | `true` | Arrêt automatique quotidien de la VM (protège le crédit Azure Students) |
+| `auto_shutdown_time` | `"1900"` | Heure d'arrêt quotidien, format `HHmm` |
+| `auto_shutdown_timezone` | `"Romance Standard Time"` | Fuseau horaire de l'arrêt automatique |
 | `tags` | `{}` | Tags Azure appliqués à toutes les ressources |
 
 Exemple de `terraform.tfvars` minimal (fonctionne tel quel, `allowed_ssh_cidr` s'auto-détecte) :
@@ -312,6 +327,34 @@ Sinon, les services sont accessibles directement (remplacer `<IP>` par l'IP publ
 
 > **Sécurité** : tous ces ports sont restreints par défaut à l'IP publique détectée automatiquement au moment du `terraform apply` (`allowed_ssh_cidr = "auto"`), à l'exception du tableau de bord (port 80) qui est volontairement public - il n'affiche que des liens et un inventaire des logiciels installés (versions), aucun secret ni information sensible. Si votre IP change ensuite, mettez à jour `terraform.tfvars` avec la nouvelle IP (ou ré-appliquez pour redétecter) puis relancez `terraform apply`.
 
+### Services en tunnel SSH uniquement (non exposés dans le NSG)
+
+Certains services sont volontairement liés à `127.0.0.1` sur la VM et ne
+sont **jamais** ouverts dans le NSG, le plus souvent parce qu'ils n'ont pas
+d'authentification forte native (code-server) ou parce que ce sont des
+cibles volontairement vulnérables (DVWA, Juice Shop, WebGoat). Le tableau
+de bord web les liste avec une pastille « tunnel SSH » et une commande
+prête à copier. Accès via un tunnel SSH local :
+
+```bash
+ssh -L 8443:localhost:8443 -i keys/devops-pro-vm_id_rsa devopsadmin@<IP>
+# puis ouvrez http://127.0.0.1:8443 dans votre navigateur
+```
+
+| Service | Port (loopback) | Profil requis | Notes |
+|---|---|---|---|
+| code-server | 8443 | tous | VS Code web, mot de passe = `terraform output portainer_admin_password` |
+| MinIO Console | 9001 | `dataops` / `fullstack` | `minioadmin` / mot de passe Portainer |
+| Metabase | 3001 | `dataops` / `fullstack` | BI, configuration au premier accès |
+| pgAdmin | 5050 | `dataops` / `fullstack` | `admin@devops-vm.local` / mot de passe Portainer |
+| cAdvisor | 8085 | tous | Métriques conteneurs en temps réel |
+| CyberChef | 8001 | `cybersecurity` / `fullstack` | Décodage/encodage/analyse de données |
+| DVWA | 8081 | `cybersecurity` / `fullstack` | Cible d'entraînement - usage légal uniquement |
+| OWASP Juice Shop | 8082 | `cybersecurity` / `fullstack` | Cible d'entraînement - usage légal uniquement |
+| WebGoat | 8083 | `cybersecurity` / `fullstack` | Cible d'entraînement - usage légal uniquement |
+
+Voir aussi `terraform output tunnel_only_services` pour la liste complète.
+
 ---
 
 ## Logiciels installés automatiquement
@@ -335,6 +378,12 @@ Sinon, les services sont accessibles directement (remplacer `<IP>` par l'IP publ
 | Skaffold | Dev loop Kubernetes local (build/push/deploy automatisé) |
 | Stern | Tail de logs multi-pods Kubernetes |
 | cosign | Signature et vérification d'images OCI (supply chain security) |
+| kustomize | Personnalisation de manifests Kubernetes sans templating |
+| kubeconform | Validation de manifests Kubernetes contre les schémas officiels |
+| popeye | Scanner de bonnes pratiques / ressources inutilisées sur un cluster |
+| k3s | Cluster Kubernetes mono-nœud réel, **installé mais désactivé par défaut** (`sudo systemctl start k3s`) |
+| dive | Inspection des layers d'une image Docker |
+| ctop | `top` pour conteneurs Docker |
 
 ### Infrastructure as Code
 
@@ -346,22 +395,38 @@ Sinon, les services sont accessibles directement (remplacer `<IP>` par l'IP publ
 | Ansible + ansible-lint + molecule | Automatisation de configuration et tests de rôles |
 | Vault | Gestion centralisée des secrets HashiCorp - http://\<IP\>:8200 |
 
+### Sécurité IaC et code (DevSecOps)
+
+| Outil | Description |
+|---|---|
+| Checkov | Analyse statique de sécurité pour Terraform/CloudFormation/K8s |
+| tfsec | Scanner de sécurité spécifique Terraform |
+| gitleaks | Détection de secrets commités dans un dépôt Git |
+| semgrep | Analyse statique de code multi-langages (règles de sécurité) |
+| conftest | Tests de policies (Open Policy Agent) sur fichiers de config |
+| terraform-docs | Génération automatique de documentation Terraform |
+| infracost | Estimation du coût cloud d'un plan Terraform |
+
 ### Cloud et CI/CD
 
 | Outil | Description |
 |---|---|
 | Azure CLI | Gestion complète des ressources Azure depuis le terminal |
+| AWS CLI | Gestion des ressources AWS (usage multi-cloud) |
+| gcloud CLI | Gestion des ressources Google Cloud (usage multi-cloud) |
 | GitHub CLI | Gestion des dépôts, PR et releases GitHub |
 | ArgoCD CLI | GitOps et déploiements continus sur Kubernetes |
 | act | Exécution de workflows GitHub Actions en local (Docker) |
 
-### Monitoring
+### Monitoring et logs
 
 | Outil | Accès | Description |
 |---|---|---|
 | Prometheus | http://\<IP\>:9090 | Collecte et stockage de métriques time-series |
 | Grafana | http://\<IP\>:3000 (admin / mot de passe généré, cf. `terraform output grafana_admin_password`) | Dashboards de visualisation - préconfigurés avec Node Exporter |
 | Node Exporter | Port 9100 (interne VNet) | Métriques système CPU, RAM, disque, réseau |
+| cAdvisor | 127.0.0.1:8085 (tunnel SSH) | Métriques d'utilisation des conteneurs Docker |
+| Loki + Promtail | 127.0.0.1:3100 (tunnel SSH, backend uniquement) | Agrégation des logs système (`/var/log/*log`), consultable depuis Grafana |
 
 ### Bases de données
 
@@ -369,10 +434,14 @@ Clients en ligne de commande : `postgresql-client`, `redis-tools`, `sqlite3`, `u
 
 Conteneurs Docker démarrés automatiquement avec données persistées dans `/data/docker-volumes/` :
 
-| Service | Port (loopback) | Credentials | Image |
-|---|---|---|---|
-| PostgreSQL 16 | 127.0.0.1:5432 | postgres / postgres | postgres:16-alpine |
-| Redis 7 | 127.0.0.1:6379 | - | redis:7-alpine |
+| Service | Port (loopback) | Credentials | Image | Profil requis |
+|---|---|---|---|---|
+| PostgreSQL 16 | 127.0.0.1:5432 | postgres / postgres | postgres:16-alpine | tous |
+| Redis 7 | 127.0.0.1:6379 | - | redis:7-alpine | tous |
+| MinIO | 127.0.0.1:9000 (API) / :9001 (console, tunnel SSH) | minioadmin / mot de passe Portainer | minio/minio | `dataops` / `fullstack` |
+| pgAdmin | 127.0.0.1:5050 (tunnel SSH) | admin@devops-vm.local / mot de passe Portainer | dpage/pgadmin4 | `dataops` / `fullstack` |
+| Metabase | 127.0.0.1:3001 (tunnel SSH) | config au 1er accès | metabase/metabase | `dataops` / `fullstack` |
+| Redpanda | 127.0.0.1:9092 | - | redpandadata/redpanda | `dataops` / `fullstack` |
 
 > Les conteneurs écoutent sur `127.0.0.1` uniquement pour éviter toute exposition publique, même si le NSG Azure filtre déjà au niveau réseau. MySQL et MongoDB ne sont volontairement pas déployés dans cette version (retirés du script d'installation) ; ajoutez-les vous-même dans `cloud-init/install.sh` si vous en avez besoin.
 
@@ -380,9 +449,11 @@ Conteneurs Docker démarrés automatiquement avec données persistées dans `/da
 
 | Catégorie | Librairies |
 |---|---|
-| Data Science | pandas, polars, numpy, matplotlib, seaborn, plotly |
+| Data Science | pandas, polars, numpy, matplotlib, seaborn, plotly, DuckDB |
 | Machine Learning | scikit-learn, xgboost, mlflow |
-| Pipelines | dbt-core, PySpark, Dask |
+| Pipelines | dbt-core, PySpark, Dask, Prefect, Great Expectations |
+| Versioning de données | DVC |
+| Visualisation / apps | Streamlit |
 | API | FastAPI, uvicorn, requests, httpx, aiohttp |
 | Bases de données | SQLAlchemy, psycopg2, redis |
 | Cloud | azure-storage-blob, azure-identity, boto3 |
@@ -419,10 +490,46 @@ Conteneurs Docker démarrés automatiquement avec données persistées dans `/da
 | netdiscover / arp-scan | Découverte réseau ARP (hôtes actifs) |
 | SecLists | Wordlists de référence - `/opt/SecLists` |
 | rockyou.txt | Wordlist - `/usr/share/wordlists/rockyou.txt` |
+| subfinder / dnsx | Énumération de sous-domaines et résolution DNS (ProjectDiscovery) |
+| httpx | Sondage HTTP/HTTPS en masse (ProjectDiscovery) |
+| naabu | Scanner de ports rapide (ProjectDiscovery) |
+| katana | Crawler web nouvelle génération (ProjectDiscovery) |
+| feroxbuster | Brute-force de répertoires web, rapide et récursif |
+| whatweb | Fingerprinting de technologies web |
+| wpscan | Scanner de vulnérabilités WordPress |
+| wfuzz | Fuzzing web générique |
+| impacket / NetExec | Exploitation et énumération Active Directory / SMB |
+| OWASP ZAP | Scanner de vulnérabilités applicatives web (image Docker) |
+| CyberChef | Décodage/encodage/analyse de données - 127.0.0.1:8001 (tunnel SSH) |
+| binwalk | Analyse et extraction de firmwares/images binaires |
+| radare2 | Framework de reverse engineering |
+| volatility3 | Analyse forensique de mémoire (RAM dumps) |
 
 Répertoire de travail dédié : `/data/pentest/{recon,exploits,reports,loot}`
 
 >  **Avertissement légal** : ces outils sont destinés à des environnements de test et d'apprentissage. Ne les utilisez jamais sur des systèmes sans autorisation explicite.
+
+### Cibles d'entraînement (volontairement vulnérables)
+
+Isolées sur `127.0.0.1`, jamais exposées via le NSG - accès uniquement par
+tunnel SSH (voir [Services en tunnel SSH uniquement](#services-en-tunnel-ssh-uniquement-non-exposés-dans-le-nsg)).
+Usage pédagogique/légal uniquement.
+
+| Outil | Port (loopback) | Description |
+|---|---|---|
+| DVWA | 8081 | Application web volontairement vulnérable (classique, par niveau de difficulté) |
+| OWASP Juice Shop | 8082 | Application e-commerce moderne volontairement vulnérable |
+| WebGoat | 8083 | Plateforme d'entraînement OWASP, leçons guidées |
+
+### Sécurité défensive (Blue Team)
+
+| Outil | Description |
+|---|---|
+| Lynis | Audit de durcissement système (hardening) |
+| ClamAV | Antivirus / scan de malwares |
+| auditd | Journalisation des appels système sensibles |
+| osquery | Interrogation de l'état du système via SQL |
+| CrowdSec | Détection et bannissement collaboratif d'IP malveillantes |
 
 ### Réseau
 
@@ -449,9 +556,13 @@ Répertoire de travail dédié : `/data/pentest/{recon,exploits,reports,loot}`
 ### Shell et Productivité
 
 - ZSH + Oh My Zsh (thème Agnoster) avec autosuggestions et syntax highlighting
-- `fzf`, `bat`, `eza` (remplaçant de `exa`), `fd`, `ripgrep`
+- `fzf`, `bat`, `eza` (remplaçant de `exa`), `fd`, `ripgrep`, `btop`, `ncdu`, `direnv`, `tldr`
 - `tmux`, `vim` (configuré avec numérotation et coloration), `htop`, `tree`, `jq`, `yq`
 - Alias prédéfinis : `k` (kubectl), `d` (docker), `dc` (docker compose), `tf` (terraform), `tg` (terragrunt)
+- **code-server** : VS Code dans le navigateur - 127.0.0.1:8443 (tunnel SSH)
+- **lazygit** / **lazydocker** : interfaces terminal pour Git et Docker
+- **restic** : sauvegarde de `/data` (installé, planification à configurer selon vos besoins)
+- **unattended-upgrades** : mises à jour de sécurité système automatiques
 
 ---
 
@@ -481,12 +592,16 @@ dépend parfois du profil `vm_profile` choisi) :
 
 > Le pare-feu UFW dans la VM est aligné sur ces mêmes règles (défense en profondeur) et s'adapte lui aussi au profil actif.
 
+> **Services ajoutés depuis la dernière mise à jour** (code-server, MinIO, Metabase, pgAdmin, cAdvisor, Loki, CyberChef, DVWA, Juice Shop, WebGoat...) : **aucun n'est ajouté au NSG**. Ils écoutent uniquement sur `127.0.0.1` à l'intérieur de la VM et ne sont accessibles que via un tunnel SSH - voir [Services en tunnel SSH uniquement](#services-en-tunnel-ssh-uniquement-non-exposés-dans-le-nsg). C'est volontaire, en particulier pour les cibles d'entraînement volontairement vulnérables.
+
 **Autres protections en place** :
 
 - **fail2ban** : bannissement automatique après 5 tentatives SSH infructueuses.
-- **Identifiants générés** : Grafana, Jupyter et Portainer n'utilisent jamais de mot de passe par défaut - tous générés aléatoirement par Terraform (`random_password`), récupérables via `terraform output` (marqués `sensitive`).
+- **Identifiants générés** : Grafana, Jupyter et Portainer n'utilisent jamais de mot de passe par défaut - tous générés aléatoirement par Terraform (`random_password`), récupérables via `terraform output` (marqués `sensitive`). Ce même mot de passe (Portainer) est réutilisé pour code-server, MinIO et pgAdmin.
 - **Clé SSH** : générée par Terraform (`tls_private_key`), jamais transmise en clair ; le dossier `keys/` est exclu de git par `.gitignore`.
 - **Vault** : initialisé et scellé (unseal) automatiquement au premier démarrage ; root token dans `/root/.vault-init` (permissions 750).
+- **Arrêt automatique quotidien** : la VM s'éteint automatiquement chaque jour (`auto_shutdown_time`, 19h par défaut) pour préserver le crédit Azure Students - désactivable via `auto_shutdown_enabled = false`. Voir `terraform output auto_shutdown_info`.
+- **Mises à jour automatiques** : `unattended-upgrades` applique les correctifs de sécurité système sans intervention.
 
 ---
 
@@ -500,9 +615,9 @@ dépend parfois du profil `vm_profile` choisi) :
 | IP Publique Standard | - | ~3$ |
 | **Total** | | **~47$/mois** |
 
-> Prix indicatifs région West Europe. **Éteignez la VM lorsqu'elle n'est pas utilisée** pour économiser votre crédit : `az vm deallocate -g rg-devops-pro-vm -n devops-pro-vm`
+> Prix indicatifs région West Europe. **L'arrêt automatique quotidien est activé par défaut** (`auto_shutdown_enabled = true`, 19h) et réduit déjà fortement la facture ; vous pouvez aussi éteindre manuellement à tout moment : `az vm deallocate -g rg-devops-pro-vm -n devops-pro-vm`
 
-**Optimisation** : passer à `Standard_B1ms` (1 vCPU / 2 GB) réduit le coût à ~18$/mois si vous n'utilisez pas les outils gourmands en mémoire (PySpark, Metasploit).
+**Optimisation** : passer à `Standard_B1ms` (1 vCPU / 2 GB) réduit le coût à ~18$/mois si vous n'utilisez pas les outils gourmands en mémoire (PySpark, Metasploit). ⚠️ Le profil `fullstack` nécessite au moins `Standard_B2ms` (8 Go) - voir l'avertissement dans [Profils étudiants](#profils-étudiants-vm_profile).
 
 ---
 
@@ -520,14 +635,15 @@ dépend parfois du profil `vm_profile` choisi) :
 | **[1/12]** | ~1 min | Détection et montage du disque de données (`/data`) |
 | **[2/12]** | ~2 min | ZSH + Oh My Zsh + plugins + configuration `.zshrc` |
 | **[3/12]** | ~3 min | Docker CE + daemon config + Portainer UI (9443, admin initialisé automatiquement) |
-| **[4/12]** | ~2 min | kubectl, Helm, k9s, kubectx, kind |
-| **[5/12]** | ~3 min | Terraform, Terragrunt, Packer, Ansible, tflint |
-| **[6/12]** | ~3 min | Azure CLI, GitHub CLI, ArgoCD, act, Vault (8200), Skaffold, Stern, cosign |
-| **[7/12]** | ~2 min | Prometheus (9090), Grafana (3000, mot de passe généré), Node Exporter (9100) |
-| **[8/12]** | ~3 min | Python 3, Jupyter Lab (8888, token généré), libs data science/ML |
+| **[3b/12]** | ~3 min | Socle commun étendu : code-server, lazygit, lazydocker, btop/ncdu/direnv, restic, unattended-upgrades |
+| **[4/12]** | ~3 min | kubectl, Helm, k9s, kubectx, kind, kustomize, kubeconform, popeye, k3s (désactivé par défaut) |
+| **[5/12]** | ~4 min | Terraform, Terragrunt, Packer, Ansible, tflint, Checkov, tfsec, gitleaks, semgrep, conftest, terraform-docs, infracost |
+| **[6/12]** | ~4 min | Azure CLI, AWS CLI, gcloud, GitHub CLI, ArgoCD, act, Vault (8200), Skaffold, Stern, cosign, dive, ctop |
+| **[7/12]** | ~3 min | Prometheus (9090), Grafana (3000, mot de passe généré), Node Exporter (9100), cAdvisor, Loki/Promtail |
+| **[8/12]** | ~4 min | Python 3, Jupyter Lab (8888, token généré), libs data science/ML, DuckDB, Streamlit, DVC, Prefect, MinIO, Metabase, pgAdmin, Redpanda |
 | **[9/12]** | ~2 min | Clients DB (`usql`) + conteneurs Docker : PostgreSQL, Redis |
 | **[10/12]** | ~2 min | Outils réseau (masscan, tshark…), Trivy, Hadolint, UFW, fail2ban |
-| **[10b/12]** | ~2 min | Pentest : Nuclei, ffuf, gobuster, Amass, theHarvester, Metasploit, Hydra, sqlmap, John, etc. |
+| **[10b/12]** | ~5 min | Pentest : Nuclei, ffuf, gobuster, Amass, theHarvester, suite ProjectDiscovery, feroxbuster, Metasploit, Hydra, sqlmap, John, impacket, NetExec, cibles d'entraînement (DVWA/Juice Shop/WebGoat), outils de défense (Lynis, ClamAV, osquery, CrowdSec) |
 | **[11/12]** | ~2 min | Go, Node.js LTS, Rust, Java 21 |
 | **[12/12]** | ~2 min | Nettoyage, permissions finales, tableau de bord de statut (nginx, port 80), messages de statut |
 
@@ -607,9 +723,18 @@ cat /root/.vault-init   # root token et unseal key (sudo requis)
 
 # Lister les conteneurs Docker actifs
 docker ps
+lazydocker   # interface terminal interactive
 
 # Vérifier les ports en écoute
 ss -tulnp
+
+# Activer k3s (désactivé par défaut pour ne pas doubler la RAM avec kind)
+sudo systemctl start k3s
+sudo k3s kubectl get nodes
+
+# Accéder à un service en tunnel SSH (ex: code-server)
+ssh -L 8443:localhost:8443 -i keys/devops-pro-vm_id_rsa devopsadmin@<IP>
+# puis ouvrir http://127.0.0.1:8443
 
 # Éteindre la VM depuis Azure (économise le crédit)
 az vm deallocate -g rg-devops-pro-vm -n devops-pro-vm
@@ -687,6 +812,31 @@ docker start postgres redis
 # Voir les logs d'un conteneur
 docker logs postgres --tail 50
 ```
+
+### Un service tunnel SSH (code-server, MinIO, DVWA...) reste injoignable
+
+```bash
+# Ces services écoutent sur 127.0.0.1 à l'intérieur de la VM, pas sur l'IP
+# publique : un tunnel SSH est obligatoire, le NSG ne les ouvre jamais.
+ssh -L <port>:localhost:<port> -i keys/devops-pro-vm_id_rsa devopsadmin@<IP>
+# puis ouvrir http://127.0.0.1:<port> dans VOTRE navigateur local
+
+# Vérifier que le conteneur/service tourne bien côté VM
+docker ps | grep <nom-service>
+sudo systemctl status code-server
+```
+
+### `terraform apply` refuse le déploiement avec une erreur de précondition
+
+```
+Error: Resource precondition failed
+Le profil "fullstack" installe simultanement tous les outils...
+```
+
+Le profil `fullstack` installe les 4 familles d'outils en même temps : une
+VM `Standard_B2s`/`B1s` (moins de 8 Go de RAM) swappe ou tue des services
+via l'OOM killer. Choisissez `Standard_B2ms` ou plus, ou déployez un profil
+unique (`devops`/`dataops`/`cybersecurity`) qui installe moins d'outils.
 
 ### Erreur Terraform "subscription not found"
 

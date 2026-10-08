@@ -63,6 +63,16 @@ pip_install() {
   fi
 }
 
+# Installe chaque paquet apt separement : un paquet introuvable n'annule
+# pas les autres. Retourne 1 si au moins un paquet a echoue (log des echecs).
+apt_each() {
+  local rc=0 pkg
+  for pkg in "$@"; do
+    apt-get install -y -qq "$pkg" >/dev/null 2>&1 || { echo "    paquet apt indisponible : $pkg"; rc=1; }
+  done
+  return $rc
+}
+
 # Recupere le tag de la derniere release GitHub d'un depot, avec retries
 # et repli propre si l'API est rate-limitee (au lieu de lancer un
 # telechargement vers une URL contenant ".../download/null/...").
@@ -96,10 +106,9 @@ apt-get install -y -qq \
   software-properties-common apt-transport-https \
   ca-certificates gnupg lsb-release \
   jq xmlstarlet \
-  net-tools nmap traceroute tcpdump wireshark-common \
+  net-tools nmap traceroute tcpdump \
   dnsutils whois mtr-tiny iperf3 \
-  netdiscover arp-scan \
-  sshpass openssh-client \
+  openssh-client \
   rsync netcat-openbsd socat httpie \
   python3 python3-pip python3-venv python3-dev \
   libssl-dev libffi-dev \
@@ -183,7 +192,9 @@ fi
 
 mkdir -p "$DATA_MOUNT"/{projects,datasets,backups,docker-volumes}
 mkdir -p "$DATA_MOUNT/docker-volumes"/{postgres,redis}
-mkdir -p "$DATA_MOUNT/pentest"/{recon,exploits,reports,loot}
+if should_run "cybersecurity"; then
+  mkdir -p "$DATA_MOUNT/pentest"/{recon,exploits,reports,loot}
+fi
 chown -R "$ADMIN_USER:$ADMIN_USER" "$DATA_MOUNT"
 
 ok "[1/12] Disque donnees configure -> $DATA_MOUNT"
@@ -348,6 +359,78 @@ fi
 ok "[3/12] Docker + Portainer installes"
 
 # ==============================================================
+# 3b. SOCLE COMMUN - outils utiles a tous les profils
+# ==============================================================
+echo "[3b/12] Outils communs (tous profils)..."
+
+apt_each btop ncdu direnv unattended-upgrades \
+  && ok "Outils CLI communs installes (btop, ncdu, direnv, unattended-upgrades)" \
+  || err "Certains outils CLI communs non installes"
+
+dpkg-reconfigure -f noninteractive unattended-upgrades 2>/dev/null \
+  && ok "Mises a jour de securite automatiques activees" \
+  || err "Configuration unattended-upgrades echouee"
+
+curl -sL https://git.io/lazygit_install | bash -s -- 2>/dev/null \
+  && ok "lazygit installe" \
+  || { LAZYGIT_VER=$(gh_latest jesseduffield/lazygit | tr -d v); \
+       [ -n "$LAZYGIT_VER" ] \
+         && curl -sLO "https://github.com/jesseduffield/lazygit/releases/download/v${LAZYGIT_VER}/lazygit_${LAZYGIT_VER}_Linux_x86_64.tar.gz" \
+         && tar xzf lazygit_*.tar.gz lazygit && install lazygit /usr/local/bin/ \
+         && ok "lazygit $LAZYGIT_VER installe" || err "lazygit non installe"; \
+       rm -f lazygit lazygit_*.tar.gz; }
+
+LAZYDOCKER_VER=$(gh_latest jesseduffield/lazydocker | tr -d v)
+if [ -n "$LAZYDOCKER_VER" ]; then
+  curl -sLO "https://github.com/jesseduffield/lazydocker/releases/download/v${LAZYDOCKER_VER}/lazydocker_${LAZYDOCKER_VER}_Linux_x86_64.tar.gz" \
+    && tar xzf lazydocker_*.tar.gz lazydocker \
+    && install lazydocker /usr/local/bin/ \
+    && ok "lazydocker $LAZYDOCKER_VER installe" || err "lazydocker non installe"
+  rm -f lazydocker lazydocker_*.tar.gz
+else
+  err "lazydocker non installe (version introuvable)"
+fi
+
+pip_install pre-commit tldr && ok "pre-commit + tldr (Python) installes" || err "pre-commit/tldr non installes"
+
+apt-get install -y restic 2>/dev/null && ok "restic installe (sauvegarde /data)" || err "restic non installe"
+
+# code-server (VS Code dans le navigateur), restreint au compte admin, sur
+# 127.0.0.1 uniquement : accessible via un tunnel SSH `ssh -L 8443:localhost:8443`
+# plutot qu'expose directement sur Internet (pas d'auth forte native).
+CODE_SERVER_PASSWORD="${CODE_SERVER_PASSWORD:-$PORTAINER_ADMIN_PASSWORD}"
+curl -fsSL https://code-server.dev/install.sh | sh 2>/dev/null \
+  && ok "code-server installe" || err "code-server non installe"
+sudo -u "$ADMIN_USER" mkdir -p "$HOME_DIR/.config/code-server"
+cat > "$HOME_DIR/.config/code-server/config.yaml" << EOF
+bind-addr: 127.0.0.1:8443
+auth: password
+password: ${CODE_SERVER_PASSWORD}
+cert: false
+EOF
+chown -R "$ADMIN_USER:$ADMIN_USER" "$HOME_DIR/.config/code-server"
+cat > /etc/systemd/system/code-server.service << EOF
+[Unit]
+Description=code-server
+After=network.target
+
+[Service]
+Type=simple
+User=$ADMIN_USER
+ExecStart=/usr/bin/code-server
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl enable --now code-server 2>/dev/null \
+  && ok "code-server demarre sur 127.0.0.1:8443 (tunnel SSH requis, mdp = mot de passe Portainer)" \
+  || err "code-server non demarre"
+
+ok "[3b/12] Outils communs installes"
+
+# ==============================================================
 # 4. KUBERNETES TOOLS
 # ==============================================================
 if should_run "devops"; then
@@ -391,7 +474,48 @@ else
   err "kind non installe (version introuvable)"
 fi
 
-ok "[4/12] kubectl / Helm / k9s / kind installes"
+curl -sLo /usr/local/bin/kustomize \
+  "https://github.com/kubernetes-sigs/kustomize/releases/latest/download/kustomize_linux_amd64.tar.gz" 2>/dev/null
+if [ -s /usr/local/bin/kustomize ]; then
+  tar xzf /usr/local/bin/kustomize -O kustomize > /tmp/kustomize 2>/dev/null \
+    && install /tmp/kustomize /usr/local/bin/kustomize && rm -f /tmp/kustomize \
+    && ok "kustomize installe" || err "kustomize non installe"
+else
+  err "kustomize non installe"
+fi
+
+KUBECONFORM_VER=$(gh_latest yannh/kubeconform)
+if [ -n "$KUBECONFORM_VER" ]; then
+  curl -sLO "https://github.com/yannh/kubeconform/releases/download/$KUBECONFORM_VER/kubeconform-linux-amd64.tar.gz" \
+    && tar xzf kubeconform-linux-amd64.tar.gz kubeconform \
+    && install kubeconform /usr/local/bin/ \
+    && ok "kubeconform $KUBECONFORM_VER installe" || err "kubeconform non installe"
+  rm -f kubeconform kubeconform-linux-amd64.tar.gz
+else
+  err "kubeconform non installe (version introuvable)"
+fi
+
+POPEYE_VER=$(gh_latest derailed/popeye)
+if [ -n "$POPEYE_VER" ]; then
+  curl -sLO "https://github.com/derailed/popeye/releases/download/$POPEYE_VER/popeye_Linux_amd64.tar.gz" \
+    && tar xzf popeye_Linux_amd64.tar.gz popeye \
+    && install popeye /usr/local/bin/ \
+    && ok "popeye $POPEYE_VER installe" || err "popeye non installe"
+  rm -f popeye popeye_Linux_amd64.tar.gz
+else
+  err "popeye non installe (version introuvable)"
+fi
+
+# k3s - cluster Kubernetes mono-noeud reel (en plus de kind, qui reste utile
+# pour des clusters ephemeres de test). Installe mais non demarre
+# automatiquement : laisse l'etudiant choisir quand le lancer (`systemctl
+# start k3s`) pour ne pas consommer de RAM en permanence a cote de kind/Docker.
+curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--write-kubeconfig-mode 644" sh -s - --disable traefik 2>/dev/null \
+  && systemctl disable k3s 2>/dev/null \
+  && ok "k3s installe (desactive par defaut : 'sudo systemctl start k3s' pour l'activer)" \
+  || err "k3s non installe"
+
+ok "[4/12] kubectl / Helm / k9s / kind / kustomize / kubeconform / popeye / k3s installes"
 else
   skip_msg "Kubernetes (profil devops uniquement)"
 fi
@@ -447,7 +571,57 @@ else
   err "tflint non installe (version introuvable)"
 fi
 
-ok "[5/12] Terraform / Terragrunt / Ansible / Packer installes"
+pip_install checkov && ok "Checkov installe" || err "Checkov non installe"
+
+TFSEC_VER=$(gh_latest aquasecurity/tfsec)
+if [ -n "$TFSEC_VER" ]; then
+  curl -sLo /usr/local/bin/tfsec \
+    "https://github.com/aquasecurity/tfsec/releases/download/$TFSEC_VER/tfsec-linux-amd64" \
+    && chmod +x /usr/local/bin/tfsec \
+    && ok "tfsec $TFSEC_VER installe" || err "tfsec non installe"
+else
+  err "tfsec non installe (version introuvable)"
+fi
+
+GITLEAKS_VER=$(gh_latest gitleaks/gitleaks | tr -d v)
+if [ -n "$GITLEAKS_VER" ]; then
+  curl -sLO "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VER}/gitleaks_${GITLEAKS_VER}_linux_x64.tar.gz" \
+    && tar xzf gitleaks_*.tar.gz gitleaks \
+    && install gitleaks /usr/local/bin/ \
+    && ok "gitleaks $GITLEAKS_VER installe" || err "gitleaks non installe"
+  rm -f gitleaks gitleaks_*.tar.gz
+else
+  err "gitleaks non installe (version introuvable)"
+fi
+
+pip_install semgrep && ok "semgrep installe" || err "semgrep non installe"
+
+CONFTEST_VER=$(gh_latest open-policy-agent/conftest | tr -d v)
+if [ -n "$CONFTEST_VER" ]; then
+  curl -sLO "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VER}/conftest_${CONFTEST_VER}_Linux_x86_64.tar.gz" \
+    && tar xzf conftest_*.tar.gz conftest \
+    && install conftest /usr/local/bin/ \
+    && ok "conftest $CONFTEST_VER installe" || err "conftest non installe"
+  rm -f conftest conftest_*.tar.gz
+else
+  err "conftest non installe (version introuvable)"
+fi
+
+TFDOCS_VER=$(gh_latest terraform-docs/terraform-docs | tr -d v)
+if [ -n "$TFDOCS_VER" ]; then
+  curl -sLO "https://github.com/terraform-docs/terraform-docs/releases/download/v${TFDOCS_VER}/terraform-docs-v${TFDOCS_VER}-linux-amd64.tar.gz" \
+    && tar xzf terraform-docs-*.tar.gz terraform-docs \
+    && install terraform-docs /usr/local/bin/ \
+    && ok "terraform-docs $TFDOCS_VER installe" || err "terraform-docs non installe"
+  rm -f terraform-docs terraform-docs-*.tar.gz
+else
+  err "terraform-docs non installe (version introuvable)"
+fi
+
+curl -fsSL https://raw.githubusercontent.com/infracost/infracost/master/scripts/install.sh | sh 2>/dev/null \
+  && ok "infracost installe (lancer 'infracost auth login' pour l'activer)" || err "infracost non installe"
+
+ok "[5/12] Terraform / Terragrunt / Ansible / Packer / Checkov / tfsec / gitleaks / semgrep / conftest / terraform-docs / infracost installes"
 else
   skip_msg "Infrastructure as Code (profil devops uniquement)"
 fi
@@ -578,7 +752,31 @@ else
   err "cosign non installe (version introuvable)"
 fi
 
-ok "[6/12] Azure CLI / GitHub CLI / ArgoCD / act / Vault / Skaffold / Stern / cosign installes"
+curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip \
+  && unzip -oq /tmp/awscliv2.zip -d /tmp \
+  && /tmp/aws/install 2>/dev/null \
+  && ok "AWS CLI installe" || err "AWS CLI non installe"
+rm -rf /tmp/awscliv2.zip /tmp/aws
+
+curl -sSL https://sdk.cloud.google.com | bash -s -- --disable-prompts --install-dir=/opt 2>/dev/null \
+  && ln -sf /opt/google-cloud-sdk/bin/gcloud /usr/local/bin/gcloud \
+  && ok "gcloud CLI installe" || err "gcloud CLI non installe"
+
+DIVE_VER=$(gh_latest wagoodman/dive | tr -d v)
+if [ -n "$DIVE_VER" ]; then
+  curl -sLO "https://github.com/wagoodman/dive/releases/download/v${DIVE_VER}/dive_${DIVE_VER}_linux_amd64.deb" \
+    && apt-get install -y ./dive_*.deb \
+    && ok "dive $DIVE_VER installe" || err "dive non installe"
+  rm -f dive_*.deb
+else
+  err "dive non installe (version introuvable)"
+fi
+
+curl -sLo /usr/local/bin/ctop "https://github.com/bcicen/ctop/releases/latest/download/ctop-linux-amd64" \
+  && chmod +x /usr/local/bin/ctop \
+  && ok "ctop installe" || err "ctop non installe"
+
+ok "[6/12] Azure CLI / AWS CLI / gcloud / GitHub CLI / ArgoCD / act / Vault / Skaffold / Stern / cosign / dive / ctop installes"
 else
   skip_msg "CI/CD Tools (profil devops uniquement)"
 fi
@@ -662,7 +860,75 @@ docker run -d \
   grafana/grafana-oss:latest \
   && ok "Grafana demarre sur :3000 (admin / mot de passe genere par Terraform)" || err "Grafana non demarre"
 
-ok "[7/12] Prometheus (9090) + Grafana (3000) + Node Exporter (9100) installes"
+docker run -d \
+  --name cadvisor \
+  --restart always \
+  -p 127.0.0.1:8085:8080 \
+  -v /:/rootfs:ro -v /var/run:/var/run:ro -v /sys:/sys:ro \
+  -v /var/lib/docker/:/var/lib/docker:ro \
+  gcr.io/cadvisor/cadvisor:latest \
+  && ok "cAdvisor demarre sur 127.0.0.1:8085" || err "cAdvisor non demarre"
+
+mkdir -p /etc/loki /etc/promtail "$DATA_MOUNT/docker-volumes/loki"
+cat > /etc/loki/loki.yml << 'EOF'
+auth_enabled: false
+server:
+  http_listen_port: 3100
+common:
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: inmemory
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+EOF
+docker run -d \
+  --name loki \
+  --restart always \
+  -p 127.0.0.1:3100:3100 \
+  -v /etc/loki/loki.yml:/etc/loki/loki.yml:ro \
+  -v "$DATA_MOUNT/docker-volumes/loki":/loki \
+  grafana/loki:latest -config.file=/etc/loki/loki.yml \
+  && ok "Loki demarre sur 127.0.0.1:3100" || err "Loki non demarre"
+
+cat > /etc/promtail/promtail.yml << 'EOF'
+server:
+  http_listen_port: 9080
+positions:
+  filename: /tmp/positions.yaml
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+scrape_configs:
+  - job_name: syslog
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: syslog
+          __path__: /var/log/*log
+EOF
+docker run -d \
+  --name promtail \
+  --restart always \
+  --link loki \
+  -v /etc/promtail/promtail.yml:/etc/promtail/promtail.yml:ro \
+  -v /var/log:/var/log:ro \
+  grafana/promtail:latest -config.file=/etc/promtail/promtail.yml \
+  && ok "Promtail demarre (agrege /var/log vers Loki)" || err "Promtail non demarre"
+
+ok "[7/12] Prometheus (9090) + Grafana (3000) + Node Exporter (9100) + cAdvisor + Loki/Promtail installes"
 
 # ==============================================================
 # 8. PYTHON / DATAOPS
@@ -754,6 +1020,63 @@ WantedBy=multi-user.target
 EOF
 systemctl enable jupyter
 
+# DuckDB CLI (leger, analyse locale sans serveur)
+DUCKDB_VER=$(gh_latest duckdb/duckdb | tr -d v)
+if [ -n "$DUCKDB_VER" ]; then
+  curl -sLO "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VER}/duckdb_cli-linux-amd64.zip" \
+    && unzip -oq duckdb_cli-linux-amd64.zip duckdb \
+    && install duckdb /usr/local/bin/ \
+    && ok "DuckDB $DUCKDB_VER installe" || err "DuckDB non installe"
+  rm -f duckdb duckdb_cli-linux-amd64.zip
+else
+  err "DuckDB non installe (version introuvable)"
+fi
+
+pip_install duckdb streamlit dvc "great_expectations" prefect \
+  && ok "DuckDB (lib Python) / Streamlit / DVC / Great Expectations / Prefect installes" \
+  || err "Certaines libs data non installees"
+
+# MinIO - stockage objet compatible S3
+docker volume create minio_data || true
+docker run -d \
+  --name minio \
+  --restart always \
+  -p 127.0.0.1:9000:9000 -p 127.0.0.1:9001:9001 \
+  -e MINIO_ROOT_USER=minioadmin \
+  -e MINIO_ROOT_PASSWORD="${PORTAINER_ADMIN_PASSWORD}" \
+  -v minio_data:/data \
+  minio/minio server /data --console-address ":9001" \
+  && ok "MinIO demarre sur 127.0.0.1:9000 (API) / :9001 (console, minioadmin / mdp Portainer)" \
+  || err "MinIO non demarre"
+
+# Metabase - BI legere
+docker run -d \
+  --name metabase \
+  --restart always \
+  -p 127.0.0.1:3001:3000 \
+  metabase/metabase:latest \
+  && ok "Metabase demarre sur 127.0.0.1:3001" || err "Metabase non demarre"
+
+# pgAdmin - administration PostgreSQL
+docker run -d \
+  --name pgadmin \
+  --restart always \
+  -p 127.0.0.1:5050:80 \
+  -e PGADMIN_DEFAULT_EMAIL=admin@devops-vm.local \
+  -e PGADMIN_DEFAULT_PASSWORD="${PORTAINER_ADMIN_PASSWORD}" \
+  dpage/pgadmin4:latest \
+  && ok "pgAdmin demarre sur 127.0.0.1:5050 (admin@devops-vm.local / mdp Portainer)" \
+  || err "pgAdmin non demarre"
+
+# Redpanda - Kafka-compatible, bien plus leger que Kafka+Zookeeper
+docker run -d \
+  --name redpanda \
+  --restart always \
+  -p 127.0.0.1:9092:9092 \
+  docker.redpanda.com/redpandadata/redpanda:latest \
+  redpanda start --overprovisioned --smp 1 --memory 512M --reserve-memory 0M --node-id 0 --check=false \
+  && ok "Redpanda (Kafka-compatible) demarre sur 127.0.0.1:9092" || err "Redpanda non demarre"
+
 ok "[8/12] Python DataOps stack installe"
 else
   skip_msg "Data Science / Jupyter (profil dataops uniquement)"
@@ -806,7 +1129,7 @@ ok "[9/12] Clients DB + conteneurs Docker demarres"
 echo "[10/12] Outils reseau & securite..."
 
 if should_run "cybersecurity"; then
-  apt-get install -y masscan tshark autossh vpnc openvpn wireguard \
+  apt_each masscan tshark wireshark-common netdiscover arp-scan sshpass autossh vpnc openvpn wireguard \
     && ok "Outils reseau installes" || err "Certains outils reseau non installes"
 else
   skip_msg "Outils reseau avances (profil cybersecurity uniquement)"
@@ -868,18 +1191,29 @@ ok "[10/12] Reseau & securite OK"
 if should_run "cybersecurity"; then
 echo "[10b/12] Outils Pentest & Securite offensive..."
 
-apt-get install -y \
-  nikto \
-  hydra \
-  sqlmap \
-  john \
-  sslscan \
-  dirb \
-  netdiscover \
-  arp-scan \
-  enum4linux \
-  nbtscan \
+# Installation paquet par paquet : un seul paquet introuvable (ex. enum4linux,
+# absent d'Ubuntu 22.04) faisait echouer TOUT le lot (sqlmap, hydra, nikto...).
+apt-get update -qq
+apt_each nikto hydra sqlmap john sslscan dirb nbtscan \
   && ok "Outils pentest apt installes" || err "Certains outils pentest apt non installes"
+
+# sqlmap : repli sur le depot officiel si le paquet apt est indisponible
+if ! command -v sqlmap >/dev/null 2>&1; then
+  git clone --depth=1 https://github.com/sqlmapproject/sqlmap.git /opt/sqlmap 2>/dev/null \
+    && ln -sf /opt/sqlmap/sqlmap.py /usr/local/bin/sqlmap \
+    && chmod +x /opt/sqlmap/sqlmap.py \
+    && ok "sqlmap installe depuis GitHub" || err "sqlmap non installe"
+fi
+
+# enum4linux-ng (successeur maintenu d'enum4linux, absent des depots Ubuntu)
+if git clone --depth=1 https://github.com/cddmp/enum4linux-ng.git /opt/enum4linux-ng 2>/dev/null; then
+  pip_install -r /opt/enum4linux-ng/requirements.txt
+  ln -sf /opt/enum4linux-ng/enum4linux-ng.py /usr/local/bin/enum4linux-ng
+  chmod +x /opt/enum4linux-ng/enum4linux-ng.py
+  ok "enum4linux-ng installe"
+else
+  err "enum4linux-ng non installe"
+fi
 
 NUCLEI_VER=$(gh_latest projectdiscovery/nuclei)
 if [ -n "$NUCLEI_VER" ]; then
@@ -917,16 +1251,35 @@ fi
 
 AMASS_VER=$(gh_latest owasp-amass/amass)
 if [ -n "$AMASS_VER" ]; then
-  curl -sLO "https://github.com/owasp-amass/amass/releases/download/$AMASS_VER/amass_Linux_amd64.zip" \
-    && unzip -oq amass_Linux_amd64.zip \
-    && install amass_Linux_amd64/amass /usr/local/bin/ \
-    && ok "Amass $AMASS_VER installe" || err "Amass non installe"
-  rm -rf amass_Linux_amd64*
+  # Les assets Amass v4+ sont en minuscules (amass_linux_amd64.zip) : on
+  # resout l'URL exacte via l'API plutot que de la deviner.
+  AMASS_URL=$(curl -fsSL --max-time 15 "https://api.github.com/repos/owasp-amass/amass/releases/latest" 2>/dev/null \
+    | jq -r '.assets[].browser_download_url | select(test("linux_amd64\\.zip$"; "i"))' 2>/dev/null | head -1 || true)
+  [ -n "$AMASS_URL" ] || AMASS_URL="https://github.com/owasp-amass/amass/releases/download/$AMASS_VER/amass_linux_amd64.zip"
+  rm -rf /tmp/amass && mkdir -p /tmp/amass
+  if curl -fsSL -o /tmp/amass/amass.zip "$AMASS_URL" \
+     && unzip -oq /tmp/amass/amass.zip -d /tmp/amass \
+     && install "$(find /tmp/amass -type f -name amass | head -1)" /usr/local/bin/amass; then
+    ok "Amass $AMASS_VER installe"
+  elif command -v go >/dev/null 2>&1 && GOBIN=/usr/local/bin go install github.com/owasp-amass/amass/v4/...@master 2>/dev/null; then
+    ok "Amass installe via go install"
+  else
+    err "Amass non installe"
+  fi
+  rm -rf /tmp/amass
 else
   err "Amass non installe (version introuvable)"
 fi
 
-pip_install theHarvester && ok "theHarvester installe" || err "theHarvester non installe"
+if git clone --depth=1 https://github.com/laramies/theHarvester.git /opt/theHarvester 2>/dev/null; then
+  python3 -m venv /opt/theHarvester/venv \
+    && /opt/theHarvester/venv/bin/pip install --quiet -r /opt/theHarvester/requirements.txt 2>/dev/null \
+    && printf '#!/bin/bash\nexec /opt/theHarvester/venv/bin/python /opt/theHarvester/theHarvester.py "$@"\n' > /usr/local/bin/theHarvester \
+    && chmod +x /usr/local/bin/theHarvester \
+    && ok "theHarvester installe" || err "theHarvester non installe"
+else
+  err "theHarvester non installe"
+fi
 
 git clone --depth=1 https://github.com/drwetter/testssl.sh /opt/testssl 2>/dev/null \
   || git -C /opt/testssl pull 2>/dev/null || true
@@ -947,6 +1300,87 @@ git clone --depth=1 https://github.com/danielmiessler/SecLists /opt/SecLists 2>/
 apt-get install -y wordlists 2>/dev/null || true
 gunzip /usr/share/wordlists/rockyou.txt.gz 2>/dev/null || true
 ok "Wordlists configurees (/usr/share/wordlists/rockyou.txt)"
+
+# -- Suite ProjectDiscovery (recon / web) --------------------
+for repo_bin in "subfinder:subfinder" "httpx:httpx" "naabu:naabu" "dnsx:dnsx" "katana:katana"; do
+  repo="${repo_bin%%:*}"; bin="${repo_bin##*:}"
+  VER=$(gh_latest "projectdiscovery/${repo}")
+  if [ -n "$VER" ]; then
+    curl -sLO "https://github.com/projectdiscovery/${repo}/releases/download/${VER}/${repo}_${VER#v}_linux_amd64.zip" \
+      && unzip -oq "${repo}_${VER#v}_linux_amd64.zip" "$bin" \
+      && install "$bin" /usr/local/bin/ \
+      && ok "$repo $VER installe" || err "$repo non installe"
+    rm -f "$bin" "${repo}_"*_linux_amd64.zip
+  else
+    err "$repo non installe (version introuvable)"
+  fi
+done
+
+FEROX_VER=$(gh_latest epi052/feroxbuster | tr -d v)
+if [ -n "$FEROX_VER" ]; then
+  curl -sLO "https://github.com/epi052/feroxbuster/releases/download/v${FEROX_VER}/x86_64-linux-feroxbuster.zip" \
+    && unzip -oq x86_64-linux-feroxbuster.zip feroxbuster \
+    && install feroxbuster /usr/local/bin/ \
+    && ok "feroxbuster $FEROX_VER installe" || err "feroxbuster non installe"
+  rm -f feroxbuster x86_64-linux-feroxbuster.zip
+else
+  err "feroxbuster non installe (version introuvable)"
+fi
+
+apt_each whatweb binwalk \
+  && ok "whatweb / binwalk installes" || err "Certains outils (whatweb/binwalk) non installes"
+
+pip_install wfuzz impacket NetExec \
+  && ok "wfuzz / impacket / NetExec installes" || err "wfuzz/impacket/NetExec non installes"
+
+# wpscan necessite ruby/gem - installation isolee pour ne pas bloquer le reste
+gem install wpscan --no-document 2>/dev/null \
+  && ok "wpscan installe" || err "wpscan non installe (ruby/gem indisponible ?)"
+
+# OWASP ZAP - scanner d'applications web, en conteneur (lourd en image)
+docker pull zaproxy/zap-stable:latest >/dev/null 2>&1 \
+  && ok "Image OWASP ZAP recuperee (lancer: docker run -t zaproxy/zap-stable zap-baseline.py -t <url>)" \
+  || err "Image OWASP ZAP non recuperee"
+
+# CyberChef - en local, pas de dependance externe au runtime
+docker run -d \
+  --name cyberchef \
+  --restart always \
+  -p 127.0.0.1:8001:80 \
+  mpepping/cyberchef:latest \
+  && ok "CyberChef demarre sur 127.0.0.1:8001" || err "CyberChef non demarre"
+
+pip_install volatility3 && ok "volatility3 installe" || err "volatility3 non installe"
+apt_each radare2 && ok "radare2 installe" || err "radare2 non installe"
+
+# -- Cibles d'entrainement volontairement vulnerables ---------
+# Isolees sur 127.0.0.1 : jamais exposees via le NSG, acces uniquement par
+# tunnel SSH (ssh -L 8080:localhost:8080 ...). Usage pedagogique uniquement.
+docker run -d --name dvwa --restart always -p 127.0.0.1:8081:80 vulnerables/web-dvwa \
+  && ok "DVWA demarre sur 127.0.0.1:8081 (cible d'entrainement, usage legal uniquement)" \
+  || err "DVWA non demarre"
+
+docker run -d --name juice-shop --restart always -p 127.0.0.1:8082:3000 bkimminich/juice-shop \
+  && ok "OWASP Juice Shop demarre sur 127.0.0.1:8082 (cible d'entrainement)" \
+  || err "Juice Shop non demarre"
+
+docker run -d --name webgoat --restart always -p 127.0.0.1:8083:8080 -p 127.0.0.1:9091:9090 webgoat/webgoat \
+  && ok "WebGoat demarre sur 127.0.0.1:8083 (cible d'entrainement)" \
+  || err "WebGoat non demarre"
+
+# -- Cote defense (blue team) ----------------------------------
+apt_each lynis clamav auditd \
+  && ok "Lynis / ClamAV / auditd installes" || err "Certains outils blue team non installes"
+freshclam --quiet 2>/dev/null || err "Mise a jour des signatures ClamAV echouee"
+
+curl -s https://install.osquery.io/ 2>/dev/null | bash -s -- 2>/dev/null \
+  || apt_each osquery
+command -v osqueryi >/dev/null 2>&1 && ok "osquery installe" || err "osquery non installe"
+
+curl -s https://install.crowdsec.net | bash 2>/dev/null \
+  && apt-get install -y crowdsec 2>/dev/null \
+  && systemctl enable --now crowdsec 2>/dev/null \
+  && ok "CrowdSec installe et demarre" || err "CrowdSec non installe"
 
 ok "[10b/12] Outils Pentest installes"
 else
@@ -1063,6 +1497,7 @@ cat << 'MOTD_HEAD'
   |   Portainer     : https://<IP>:9443 (admin / cf. `terraform output portainer_admin_password`) |
   |   PostgreSQL    : localhost:5432    (postgres/postgres)|
   |   Redis         : localhost:6379                       |
+  |   code-server   : 127.0.0.1:8443 (tunnel SSH, mdp Portainer) |
 MOTD_HEAD
 
 if should_run "devops"; then
@@ -1072,6 +1507,9 @@ cat << 'MOTD_DEVOPS'
   |    Terraform     : terraform --version                 |
   |   Vault         : http://<IP>:8200 (init /root)       |
   |   Skaffold      : skaffold version                    |
+  |   k3s (off)     : sudo systemctl start k3s             |
+  |   Securite code : checkov / tfsec / gitleaks / semgrep |
+  |   AWS/GCP CLI   : aws --version / gcloud --version     |
 MOTD_DEVOPS
 fi
 
@@ -1079,6 +1517,11 @@ if should_run "dataops"; then
 cat << 'MOTD_DATAOPS'
   +==========================================================+
   |   Jupyter       : http://<IP>:8888  (token: cf. `terraform output jupyter_token`) |
+  |   DuckDB        : duckdb (CLI)                         |
+  |   MinIO         : 127.0.0.1:9001 (console, minioadmin / mdp Portainer) |
+  |   Metabase      : 127.0.0.1:3001                       |
+  |   pgAdmin       : 127.0.0.1:5050 (admin@devops-vm.local / mdp Portainer) |
+  |   Redpanda      : 127.0.0.1:9092 (Kafka-compatible)     |
 MOTD_DATAOPS
 fi
 
@@ -1090,6 +1533,10 @@ cat << 'MOTD_CYBER'
   |   Exploit       : msfconsole (Metasploit)             |
   |   Wordlists     : /opt/SecLists / rockyou.txt         |
   |   Pentest dir   : /data/pentest/                      |
+  |   Recon         : subfinder / httpx / naabu / dnsx / katana / feroxbuster |
+  |   Cibles (tunnel SSH) : DVWA :8081 / Juice Shop :8082 / WebGoat :8083 |
+  |   Blue team     : lynis / clamav / auditd / osquery / crowdsec |
+  |   CyberChef     : 127.0.0.1:8001                       |
 MOTD_CYBER
 fi
 
@@ -1160,37 +1607,65 @@ CYBER_ON=$(should_run "cybersecurity" && echo true || echo false)
 # -- Inventaire des logiciels installes (pour le dashboard) ----
 # Chaque valeur est vide si l'outil n'est pas installe / injoignable :
 # le dashboard affiche alors "-" plutot qu'une fausse information.
-V_DOCKER=$(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',')
-V_GIT=$(git --version 2>/dev/null | awk '{print $3}')
-V_PYTHON=$(python3 --version 2>/dev/null | awk '{print $2}')
+V_DOCKER=$(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',') || true
+V_GIT=$(git --version 2>/dev/null | awk '{print $3}') || true
+V_PYTHON=$(python3 --version 2>/dev/null | awk '{print $2}') || true
 
-V_KUBECTL=$(kubectl version --client 2>/dev/null | grep -oP 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-V_HELM=$(helm version --short 2>/dev/null | cut -d'+' -f1)
-V_K9S=$(k9s version 2>/dev/null | grep -i version | head -1 | awk '{print $NF}')
-V_KIND=$(kind version 2>/dev/null | awk '{print $2}')
-V_TERRAFORM=$(terraform version -json 2>/dev/null | jq -r '.terraform_version' 2>/dev/null)
-V_TERRAGRUNT=$(terragrunt --version 2>/dev/null | awk '{print $3}')
-V_PACKER=$(packer version 2>/dev/null | head -1 | awk '{print $2}')
-V_ANSIBLE=$(ansible --version 2>/dev/null | head -1 | grep -oP '[0-9]+\.[0-9]+\.[0-9]+')
-V_TFLINT=$(tflint --version 2>/dev/null | head -1 | awk '{print $NF}')
-V_VAULT=$(vault version 2>/dev/null | awk '{print $2}')
-V_AZCLI=$(az version 2>/dev/null | jq -r '."azure-cli"' 2>/dev/null)
-V_GHCLI=$(gh --version 2>/dev/null | head -1 | awk '{print $3}')
-V_ARGOCD=$(argocd version --client 2>/dev/null | grep -oP 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-V_TRIVY=$(trivy --version 2>/dev/null | head -1 | awk '{print $2}')
+V_KUBECTL=$(kubectl version --client 2>/dev/null | grep -oP 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1) || true
+V_HELM=$(helm version --short 2>/dev/null | cut -d'+' -f1) || true
+V_K9S=$(k9s version 2>/dev/null | grep -i version | head -1 | awk '{print $NF}') || true
+V_KIND=$(kind version 2>/dev/null | awk '{print $2}') || true
+V_TERRAFORM=$(terraform version -json 2>/dev/null | jq -r '.terraform_version' 2>/dev/null) || true
+V_TERRAGRUNT=$(terragrunt --version 2>/dev/null | awk '{print $3}') || true
+V_PACKER=$(packer version 2>/dev/null | head -1 | awk '{print $2}') || true
+V_ANSIBLE=$(ansible --version 2>/dev/null | head -1 | grep -oP '[0-9]+\.[0-9]+\.[0-9]+') || true
+V_TFLINT=$(tflint --version 2>/dev/null | head -1 | awk '{print $NF}') || true
+V_VAULT=$(vault version 2>/dev/null | awk '{print $2}') || true
+V_AZCLI=$(az version 2>/dev/null | jq -r '."azure-cli"' 2>/dev/null) || true
+V_GHCLI=$(gh --version 2>/dev/null | head -1 | awk '{print $3}') || true
+V_ARGOCD=$(argocd version --client 2>/dev/null | grep -oP 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1) || true
+V_TRIVY=$(trivy --version 2>/dev/null | head -1 | awk '{print $2}') || true
 
-V_JUPYTER=$(jupyter --version 2>/dev/null | head -1)
+V_JUPYTER=$(jupyter --version 2>/dev/null | head -1) || true
 
-V_NUCLEI=$(command -v nuclei >/dev/null 2>&1 && nuclei -version 2>&1 | grep -oP 'v[0-9][0-9.]*' | head -1)
-V_METASPLOIT=$(command -v msfconsole >/dev/null 2>&1 && echo "installe")
-V_FFUF=$(ffuf -V 2>/dev/null | awk '{print $2}')
-V_GOBUSTER=$(command -v gobuster >/dev/null 2>&1 && echo "installe")
-V_AMASS=$(command -v amass >/dev/null 2>&1 && echo "installe")
-V_SQLMAP=$(command -v sqlmap >/dev/null 2>&1 && echo "installe")
+V_NUCLEI=$(command -v nuclei >/dev/null 2>&1 && nuclei -version 2>&1 | grep -oP 'v[0-9][0-9.]*' | head -1) || true
+V_METASPLOIT=$(command -v msfconsole >/dev/null 2>&1 && echo "installe") || true
+V_FFUF=$(ffuf -V 2>/dev/null | awk '{print $2}') || true
+V_GOBUSTER=$(command -v gobuster >/dev/null 2>&1 && echo "installe") || true
+V_AMASS=$(command -v amass >/dev/null 2>&1 && echo "installe") || true
+V_SQLMAP=$(command -v sqlmap >/dev/null 2>&1 && echo "installe") || true
 
-V_GO=$(go version 2>/dev/null | awk '{print $3}')
-V_NODE=$(node --version 2>/dev/null)
-V_JAVA=$(java -version 2>&1 | grep -oP '(?<=version ")[0-9][^"]*' | head -1)
+# -- Inventaire : ajouts socle commun / securite IaC / cloud / data / recon --
+V_CODESERVER=$(command -v code-server >/dev/null 2>&1 && code-server --version 2>/dev/null | head -1 | awk '{print $1}') || true
+V_LAZYGIT=$(command -v lazygit >/dev/null 2>&1 && echo "installe") || true
+V_LAZYDOCKER=$(command -v lazydocker >/dev/null 2>&1 && echo "installe") || true
+V_RESTIC=$(restic version 2>/dev/null | awk '{print $2}') || true
+
+V_KUSTOMIZE=$(kustomize version --short 2>/dev/null | grep -oP 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1) || true
+V_K3S=$(k3s --version 2>/dev/null | head -1 | awk '{print $3}') || true
+V_CHECKOV=$(checkov --version 2>/dev/null) || true
+V_TFSEC=$(tfsec --version 2>/dev/null | head -1) || true
+V_GITLEAKS=$(gitleaks version 2>/dev/null | head -1) || true
+V_SEMGREP=$(semgrep --version 2>/dev/null | head -1) || true
+V_AWSCLI=$(aws --version 2>/dev/null | awk '{print $1}' | cut -d/ -f2) || true
+V_GCLOUD=$(gcloud --version 2>/dev/null | head -1 | awk '{print $NF}') || true
+
+V_DUCKDB=$(duckdb --version 2>/dev/null | awk '{print $1}') || true
+V_STREAMLIT=$(streamlit --version 2>/dev/null | awk '{print $NF}') || true
+V_DVC=$(dvc --version 2>/dev/null) || true
+V_PREFECT=$(prefect --version 2>/dev/null) || true
+
+V_SUBFINDER=$(command -v subfinder >/dev/null 2>&1 && echo "installe") || true
+V_HTTPX=$(command -v httpx >/dev/null 2>&1 && echo "installe") || true
+V_FEROXBUSTER=$(feroxbuster --version 2>/dev/null | awk '{print $2}') || true
+V_IMPACKET=$(python3 -c 'import impacket; print(impacket.__version__)' 2>/dev/null) || true
+V_OSQUERY=$(command -v osqueryi >/dev/null 2>&1 && echo "installe") || true
+V_CROWDSEC=$(command -v crowdsec >/dev/null 2>&1 && echo "installe") || true
+V_LYNIS=$(lynis --version 2>/dev/null | head -1) || true
+
+V_GO=$(go version 2>/dev/null | awk '{print $3}') || true
+V_NODE=$(node --version 2>/dev/null) || true
+V_JAVA=$(java -version 2>&1 | grep -oP '(?<=version ")[0-9][^"]*' | head -1) || true
 
 mkdir -p /var/www/html
 cat > /var/www/html/index.html << 'DASHBOARD_EOF'
@@ -1304,6 +1779,11 @@ cat > /var/www/html/index.html << 'DASHBOARD_EOF'
   .dot.checking{ background:var(--checking); animation:blink 1s infinite; }
   .dot.up{ background:var(--up); box-shadow:0 0 0 0 rgba(52,211,153,.55); animation:pulse-ring 1.8s infinite; }
   .dot.down{ background:var(--down); box-shadow:0 0 10px 0 rgba(251,113,133,.5); }
+  .dot.tunnel{ background:var(--accent-2); }
+  .tunnel-note{
+    font-size:11.5px; color:var(--muted); background:rgba(255,255,255,.04);
+    border:1px solid var(--border); border-radius:8px; padding:6px 9px; margin-top:8px;
+  }
 
   .desc{ color:var(--muted); font-size:13px; line-height:1.55; min-height:40px; }
 
@@ -1416,6 +1896,7 @@ cat > /var/www/html/index.html << 'DASHBOARD_EOF'
 
 <script>
 const PROFILE = PLACEHOLDER_PROFILE;
+const ADMIN_USER = PLACEHOLDER_ADMIN_USER;
 const HOST = window.location.hostname;
 document.body.setAttribute("data-profile", PROFILE);
 
@@ -1424,20 +1905,54 @@ const ICONS = {
   prometheus: '<path d="M12 2a7 7 0 0 0-7 7c0 3 2 5 3 7l1 3h6l1-3c1-2 3-4 3-7a7 7 0 0 0-7-7z"/><path d="M9 15h6"/>',
   portainer: '<path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/>',
   jupyter: '<circle cx="12" cy="6" r="2.2"/><circle cx="6" cy="16" r="2.2"/><circle cx="18" cy="16" r="2.2"/><path d="M8 15c1.5-2 6.5-2 8 0"/>',
-  vault: '<rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>'
+  vault: '<rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
+  codeserver: '<path d="M8 4L2 12l6 8"/><path d="M16 4l6 8-6 8"/>',
+  minio: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
+  metabase: '<rect x="3" y="12" width="4" height="8"/><rect x="10" y="7" width="4" height="13"/><rect x="17" y="3" width="4" height="17"/>',
+  pgadmin: '<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/>',
+  cyberchef: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/>',
+  cadvisor: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
+  dvwa: '<path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-4z"/>',
+  juiceshop: '<path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-4z"/>',
+  webgoat: '<path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-4z"/>'
 };
+const GENERIC_ICON = '<circle cx="12" cy="12" r="9"/>';
 
+// tunnelOnly:true = service lie a 127.0.0.1 sur la VM, jamais ouvert dans le
+// NSG. Accessible uniquement via un tunnel SSH ; "Ouvrir" pointe alors vers
+// 127.0.0.1:<port> sur VOTRE machine (valide une fois le tunnel etabli), et
+// aucune verification d'etat n'est tentee depuis le navigateur (toujours
+// injoignable en direct, ce qui serait trompeur).
 const SERVICES = [
-  { key:"grafana", name:"Grafana", port:3000, https:false, enabled:true,
+  { key:"grafana", name:"Grafana", port:3000, https:false, enabled:true, tunnelOnly:false,
     desc:"Dashboards de monitoring. Identifiant admin, mot de passe genere par Terraform." },
-  { key:"prometheus", name:"Prometheus", port:9090, https:false, enabled:true,
+  { key:"prometheus", name:"Prometheus", port:9090, https:false, enabled:true, tunnelOnly:false,
     desc:"Moteur de metriques, source de donnees de Grafana." },
-  { key:"portainer", name:"Portainer", port:9443, https:true, enabled:true,
+  { key:"portainer", name:"Portainer", port:9443, https:true, enabled:true, tunnelOnly:false,
     desc:"Interface de gestion Docker. Certificat auto-signe : acceptez l'avertissement au premier acces." },
-  { key:"jupyter", name:"JupyterLab", port:8888, https:false, enabled:PLACEHOLDER_DATAOPS,
+  { key:"jupyter", name:"JupyterLab", port:8888, https:false, enabled:PLACEHOLDER_DATAOPS, tunnelOnly:false,
     desc:"Notebooks Python / data science. Lien avec token deja inclus." },
-  { key:"vault", name:"Vault", port:8200, https:false, enabled:PLACEHOLDER_DEVOPS,
-    desc:"Secrets management HashiCorp. Root token dans /root/.vault-init sur la VM." }
+  { key:"vault", name:"Vault", port:8200, https:false, enabled:PLACEHOLDER_DEVOPS, tunnelOnly:false,
+    desc:"Secrets management HashiCorp. Root token dans /root/.vault-init sur la VM." },
+
+  { key:"codeserver", name:"code-server", port:8443, https:false, enabled:true, tunnelOnly:true,
+    desc:"VS Code dans le navigateur. Mot de passe = mot de passe Portainer." },
+  { key:"minio", name:"MinIO Console", port:9001, https:false, enabled:PLACEHOLDER_DATAOPS, tunnelOnly:true,
+    desc:"Stockage objet S3. Identifiant minioadmin, mot de passe Portainer." },
+  { key:"metabase", name:"Metabase", port:3001, https:false, enabled:PLACEHOLDER_DATAOPS, tunnelOnly:true,
+    desc:"BI / tableaux de bord sur vos bases de donnees. Configuration au premier acces." },
+  { key:"pgadmin", name:"pgAdmin", port:5050, https:false, enabled:PLACEHOLDER_DATAOPS, tunnelOnly:true,
+    desc:"Administration PostgreSQL. admin@devops-vm.local, mot de passe Portainer." },
+  { key:"cadvisor", name:"cAdvisor", port:8085, https:false, enabled:true, tunnelOnly:true,
+    desc:"Metriques d'utilisation des conteneurs Docker en temps reel." },
+  { key:"cyberchef", name:"CyberChef", port:8001, https:false, enabled:PLACEHOLDER_CYBER, tunnelOnly:true,
+    desc:"Couteau suisse pour decoder/encoder/analyser des donnees (analyse, forensic)." },
+  { key:"dvwa", name:"DVWA", port:8081, https:false, enabled:PLACEHOLDER_CYBER, tunnelOnly:true,
+    desc:"Cible d'entrainement volontairement vulnerable. Usage pedagogique/legal uniquement." },
+  { key:"juiceshop", name:"OWASP Juice Shop", port:8082, https:false, enabled:PLACEHOLDER_CYBER, tunnelOnly:true,
+    desc:"Cible d'entrainement volontairement vulnerable. Usage pedagogique/legal uniquement." },
+  { key:"webgoat", name:"WebGoat", port:8083, https:false, enabled:PLACEHOLDER_CYBER, tunnelOnly:true,
+    desc:"Cible d'entrainement volontairement vulnerable. Usage pedagogique/legal uniquement." }
 ];
 
 // Chaque outil : la version est celle reellement detectee sur CETTE VM au
@@ -1450,6 +1965,10 @@ const TOOLS = [
   { category:"Socle commun", name:"Docker", version:PLACEHOLDER_V_DOCKER, enabled:true },
   { category:"Socle commun", name:"Git", version:PLACEHOLDER_V_GIT, enabled:true },
   { category:"Socle commun", name:"Python 3", version:PLACEHOLDER_V_PYTHON, enabled:true },
+  { category:"Socle commun", name:"code-server", version:PLACEHOLDER_V_CODESERVER, enabled:true },
+  { category:"Socle commun", name:"lazygit", version:PLACEHOLDER_V_LAZYGIT, enabled:true },
+  { category:"Socle commun", name:"lazydocker", version:PLACEHOLDER_V_LAZYDOCKER, enabled:true },
+  { category:"Socle commun", name:"restic", version:PLACEHOLDER_V_RESTIC, enabled:true },
 
   // DevOps & Cloud - profil devops / fullstack
   { category:"DevOps & Cloud", name:"kubectl", version:PLACEHOLDER_V_KUBECTL, enabled:PLACEHOLDER_DEVOPS },
@@ -1466,9 +1985,21 @@ const TOOLS = [
   { category:"DevOps & Cloud", name:"GitHub CLI", version:PLACEHOLDER_V_GHCLI, enabled:PLACEHOLDER_DEVOPS },
   { category:"DevOps & Cloud", name:"ArgoCD CLI", version:PLACEHOLDER_V_ARGOCD, enabled:PLACEHOLDER_DEVOPS },
   { category:"DevOps & Cloud", name:"Trivy", version:PLACEHOLDER_V_TRIVY, enabled:PLACEHOLDER_DEVOPS },
+  { category:"DevOps & Cloud", name:"kustomize", version:PLACEHOLDER_V_KUSTOMIZE, enabled:PLACEHOLDER_DEVOPS },
+  { category:"DevOps & Cloud", name:"k3s (desactive)", version:PLACEHOLDER_V_K3S, enabled:PLACEHOLDER_DEVOPS },
+  { category:"DevOps & Cloud", name:"Checkov", version:PLACEHOLDER_V_CHECKOV, enabled:PLACEHOLDER_DEVOPS },
+  { category:"DevOps & Cloud", name:"tfsec", version:PLACEHOLDER_V_TFSEC, enabled:PLACEHOLDER_DEVOPS },
+  { category:"DevOps & Cloud", name:"gitleaks", version:PLACEHOLDER_V_GITLEAKS, enabled:PLACEHOLDER_DEVOPS },
+  { category:"DevOps & Cloud", name:"semgrep", version:PLACEHOLDER_V_SEMGREP, enabled:PLACEHOLDER_DEVOPS },
+  { category:"DevOps & Cloud", name:"AWS CLI", version:PLACEHOLDER_V_AWSCLI, enabled:PLACEHOLDER_DEVOPS },
+  { category:"DevOps & Cloud", name:"gcloud CLI", version:PLACEHOLDER_V_GCLOUD, enabled:PLACEHOLDER_DEVOPS },
 
   // Data & IA - profil dataops / fullstack
   { category:"Data & IA", name:"JupyterLab", version:PLACEHOLDER_V_JUPYTER, enabled:PLACEHOLDER_DATAOPS },
+  { category:"Data & IA", name:"DuckDB", version:PLACEHOLDER_V_DUCKDB, enabled:PLACEHOLDER_DATAOPS },
+  { category:"Data & IA", name:"Streamlit", version:PLACEHOLDER_V_STREAMLIT, enabled:PLACEHOLDER_DATAOPS },
+  { category:"Data & IA", name:"DVC", version:PLACEHOLDER_V_DVC, enabled:PLACEHOLDER_DATAOPS },
+  { category:"Data & IA", name:"Prefect", version:PLACEHOLDER_V_PREFECT, enabled:PLACEHOLDER_DATAOPS },
 
   // Cybersecurite - profil cybersecurity / fullstack
   { category:"Cybersecurite", name:"Nuclei", version:PLACEHOLDER_V_NUCLEI, enabled:PLACEHOLDER_CYBER },
@@ -1477,6 +2008,13 @@ const TOOLS = [
   { category:"Cybersecurite", name:"gobuster", version:PLACEHOLDER_V_GOBUSTER, enabled:PLACEHOLDER_CYBER },
   { category:"Cybersecurite", name:"Amass", version:PLACEHOLDER_V_AMASS, enabled:PLACEHOLDER_CYBER },
   { category:"Cybersecurite", name:"sqlmap", version:PLACEHOLDER_V_SQLMAP, enabled:PLACEHOLDER_CYBER },
+  { category:"Cybersecurite", name:"subfinder", version:PLACEHOLDER_V_SUBFINDER, enabled:PLACEHOLDER_CYBER },
+  { category:"Cybersecurite", name:"httpx", version:PLACEHOLDER_V_HTTPX, enabled:PLACEHOLDER_CYBER },
+  { category:"Cybersecurite", name:"feroxbuster", version:PLACEHOLDER_V_FEROXBUSTER, enabled:PLACEHOLDER_CYBER },
+  { category:"Cybersecurite", name:"impacket", version:PLACEHOLDER_V_IMPACKET, enabled:PLACEHOLDER_CYBER },
+  { category:"Cybersecurite (defense)", name:"osquery", version:PLACEHOLDER_V_OSQUERY, enabled:PLACEHOLDER_CYBER },
+  { category:"Cybersecurite (defense)", name:"CrowdSec", version:PLACEHOLDER_V_CROWDSEC, enabled:PLACEHOLDER_CYBER },
+  { category:"Cybersecurite (defense)", name:"Lynis", version:PLACEHOLDER_V_LYNIS, enabled:PLACEHOLDER_CYBER },
 
   // Langages - profils devops et dataops
   { category:"Langages", name:"Go", version:PLACEHOLDER_V_GO, enabled: (PLACEHOLDER_DEVOPS || PLACEHOLDER_DATAOPS) },
@@ -1485,7 +2023,14 @@ const TOOLS = [
 ];
 
 function buildUrl(s){
-  return (s.https ? "https://" : "http://") + HOST + ":" + s.port;
+  // Un service tunnelOnly n'est jamais ouvert dans le NSG : le lien pointe
+  // vers 127.0.0.1 (votre poste), valide une fois le tunnel SSH etabli.
+  const host = s.tunnelOnly ? "127.0.0.1" : HOST;
+  return (s.https ? "https://" : "http://") + host + ":" + s.port;
+}
+
+function sshTunnelCmd(s){
+  return `ssh -L ${s.port}:localhost:${s.port} -i keys/<vm_name>_id_rsa ${ADMIN_USER}@${HOST}`;
 }
 
 function svgIcon(paths, cls){
@@ -1498,13 +2043,19 @@ function makeCard(s, index){
   card.className = "card";
   card.style.animationDelay = (index * 90) + "ms";
 
+  const copyTarget = s.tunnelOnly ? sshTunnelCmd(s) : url;
+  const copyLabel = s.tunnelOnly ? "Copier la commande tunnel" : "Copier";
+  const statusHtml = s.tunnelOnly
+    ? `<span class="dot tunnel"></span><span>tunnel SSH</span>`
+    : `<span class="dot checking" id="dot-${s.key}"></span><span id="label-${s.key}">verif.</span>`;
+
   card.innerHTML = `
     <div class="card-top">
       <div class="card-id">
-        <div class="icon-box">${svgIcon(ICONS[s.key])}</div>
+        <div class="icon-box">${svgIcon(ICONS[s.key] || GENERIC_ICON)}</div>
         <div class="card-title">${s.name}</div>
       </div>
-      <div class="status"><span class="dot checking" id="dot-${s.key}"></span><span id="label-${s.key}">verif.</span></div>
+      <div class="status">${statusHtml}</div>
     </div>
     <div class="desc">${s.desc}</div>
     <div class="row">
@@ -1512,16 +2063,17 @@ function makeCard(s, index){
         ${svgIcon('<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14L21 3"/>')}
         Ouvrir
       </a>
-      <button class="btn" data-copy="${url}">
+      <button class="btn" data-copy="${escapeHtml(copyTarget)}">
         ${svgIcon('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>')}
-        Copier
+        ${copyLabel}
       </button>
     </div>
     <div class="url-line">${url}</div>
+    ${s.tunnelOnly ? `<div class="tunnel-note">Non expose publiquement. Ouvrez un tunnel : <code>${escapeHtml(sshTunnelCmd(s))}</code> puis cliquez "Ouvrir".</div>` : ``}
   `;
 
   card.querySelector("[data-copy]").addEventListener("click", function(){
-    navigator.clipboard.writeText(url).then(() => {
+    navigator.clipboard.writeText(copyTarget).then(() => {
       const btn = this;
       const original = btn.innerHTML;
       btn.innerHTML = svgIcon('<path d="M20 6L9 17l-5-5"/>') + "Copie !";
@@ -1545,9 +2097,13 @@ function checkStatus(s){
 }
 
 function updateCount(active){
-  Promise.all(active.map(checkStatus)).then(results => {
+  // Les services tunnelOnly ne sont jamais verifies depuis le navigateur
+  // (127.0.0.1 depuis le poste de l'utilisateur, toujours injoignable sans
+  // tunnel actif) : ils sont exclus du compteur "en ligne".
+  const checkable = active.filter(s => !s.tunnelOnly);
+  Promise.all(checkable.map(checkStatus)).then(results => {
     const up = results.filter(Boolean).length;
-    document.getElementById("count-badge").textContent = up + " / " + active.length + " services en ligne";
+    document.getElementById("count-badge").textContent = up + " / " + checkable.length + " services en ligne";
   });
 }
 
@@ -1626,7 +2182,7 @@ DASHBOARD_EOF
 # brute contient des guillemets) qui casseraient une substitution sed/JS.
 # json.dumps() produit une chaine JS toujours valide, quel que soit le
 # contenu - y compris une chaine vide si l'outil n'est pas installe.
-PROFILE="$VM_PROFILE" \
+PROFILE="$VM_PROFILE" ADMIN_USER="$ADMIN_USER" \
 DATAOPS_ON="$DATAOPS_ON" DEVOPS_ON="$DEVOPS_ON" CYBER_ON="$CYBER_ON" \
 V_DOCKER="$V_DOCKER" V_GIT="$V_GIT" V_PYTHON="$V_PYTHON" \
 V_KUBECTL="$V_KUBECTL" V_HELM="$V_HELM" V_K9S="$V_K9S" V_KIND="$V_KIND" \
@@ -1637,6 +2193,12 @@ V_JUPYTER="$V_JUPYTER" \
 V_NUCLEI="$V_NUCLEI" V_METASPLOIT="$V_METASPLOIT" V_FFUF="$V_FFUF" \
 V_GOBUSTER="$V_GOBUSTER" V_AMASS="$V_AMASS" V_SQLMAP="$V_SQLMAP" \
 V_GO="$V_GO" V_NODE="$V_NODE" V_JAVA="$V_JAVA" \
+V_CODESERVER="$V_CODESERVER" V_LAZYGIT="$V_LAZYGIT" V_LAZYDOCKER="$V_LAZYDOCKER" V_RESTIC="$V_RESTIC" \
+V_KUSTOMIZE="$V_KUSTOMIZE" V_K3S="$V_K3S" V_CHECKOV="$V_CHECKOV" V_TFSEC="$V_TFSEC" \
+V_GITLEAKS="$V_GITLEAKS" V_SEMGREP="$V_SEMGREP" V_AWSCLI="$V_AWSCLI" V_GCLOUD="$V_GCLOUD" \
+V_DUCKDB="$V_DUCKDB" V_STREAMLIT="$V_STREAMLIT" V_DVC="$V_DVC" V_PREFECT="$V_PREFECT" \
+V_SUBFINDER="$V_SUBFINDER" V_HTTPX="$V_HTTPX" V_FEROXBUSTER="$V_FEROXBUSTER" V_IMPACKET="$V_IMPACKET" \
+V_OSQUERY="$V_OSQUERY" V_CROWDSEC="$V_CROWDSEC" V_LYNIS="$V_LYNIS" \
 python3 - << 'PYEOF'
 import json, os
 
@@ -1656,7 +2218,7 @@ for token, value in bool_map.items():
 # Chaines : converties en litteral JS sur via json.dumps (gere guillemets,
 # antislashs, chaine vide, etc. sans jamais casser la syntaxe JS).
 string_vars = [
-    "PROFILE",
+    "PROFILE", "ADMIN_USER",
     "V_DOCKER", "V_GIT", "V_PYTHON",
     "V_KUBECTL", "V_HELM", "V_K9S", "V_KIND",
     "V_TERRAFORM", "V_TERRAGRUNT", "V_PACKER", "V_ANSIBLE", "V_TFLINT",
@@ -1664,8 +2226,18 @@ string_vars = [
     "V_JUPYTER",
     "V_NUCLEI", "V_METASPLOIT", "V_FFUF", "V_GOBUSTER", "V_AMASS", "V_SQLMAP",
     "V_GO", "V_NODE", "V_JAVA",
+    "V_CODESERVER", "V_LAZYGIT", "V_LAZYDOCKER", "V_RESTIC",
+    "V_KUSTOMIZE", "V_K3S", "V_CHECKOV", "V_TFSEC", "V_GITLEAKS", "V_SEMGREP",
+    "V_AWSCLI", "V_GCLOUD",
+    "V_DUCKDB", "V_STREAMLIT", "V_DVC", "V_PREFECT",
+    "V_SUBFINDER", "V_HTTPX", "V_FEROXBUSTER", "V_IMPACKET",
+    "V_OSQUERY", "V_CROWDSEC", "V_LYNIS",
 ]
-for name in string_vars:
+# Tri par longueur de token decroissante : certains noms sont le prefixe
+# d'un autre (ex. "V_GIT" est un prefixe de "V_GITLEAKS", "V_GO" de
+# "V_GOBUSTER"). Remplacer le plus court en premier corromprait le token le
+# plus long ("PLACEHOLDER_V_GITLEAKS" deviendrait "<valeur V_GIT>LEAKS").
+for name in sorted(string_vars, key=len, reverse=True):
     token = "PLACEHOLDER_" + name
     value = os.environ.get(name, "") or ""
     content = content.replace(token, json.dumps(value))

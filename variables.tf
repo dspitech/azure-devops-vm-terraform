@@ -110,6 +110,24 @@ EOT
   }
 }
 
+variable "auto_shutdown_enabled" {
+  description = "Active l'arret automatique quotidien de la VM (recommande sur un abonnement Azure Students pour preserver le credit)."
+  type        = bool
+  default     = true
+}
+
+variable "auto_shutdown_time" {
+  description = "Heure d'arret automatique quotidien, format HHmm (ex: \"1900\")."
+  type        = string
+  default     = "1900"
+}
+
+variable "auto_shutdown_timezone" {
+  description = "Fuseau horaire de l'heure d'arret automatique."
+  type        = string
+  default     = "Romance Standard Time" # Europe (Paris/Oslo...) ; voir `az account list-locations` ou la doc Azure pour la liste.
+}
+
 variable "allowed_ssh_cidr" {
   description = <<EOT
 CIDR autorisé pour SSH et les outils sensibles (Jupyter, Grafana, Portainer,
