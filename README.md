@@ -307,6 +307,18 @@ tail -f /var/log/devops-install.log
 devops-status
 ```
 
+<img width="1090" height="535" alt="image" src="https://github.com/user-attachments/assets/53d4d795-369c-4588-b249-ebbc86a93d63" />
+
+<img width="1090" height="618" alt="image" src="https://github.com/user-attachments/assets/d9d143f5-be9b-4b69-a70d-c99c916cbad0" />
+
+<img width="1090" height="605" alt="image" src="https://github.com/user-attachments/assets/b362c1db-f31e-4e5b-872e-4b61a07c717c" />
+
+<img width="1090" height="506" alt="image" src="https://github.com/user-attachments/assets/3b5ea2e5-f9c8-4817-ae27-2d4cbb4980a9" />
+
+
+
+
+
 ### 5. Accéder aux services
 
 **Le plus simple : ouvrez le tableau de bord** - `terraform output dashboard_url`
