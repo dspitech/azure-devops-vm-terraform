@@ -72,13 +72,30 @@ output "auto_shutdown_info" {
   value       = var.auto_shutdown_enabled ? "VM arrêtée automatiquement chaque jour à ${var.auto_shutdown_time} (${var.auto_shutdown_timezone})" : "Arrêt automatique désactivé (auto_shutdown_enabled = false)"
 }
 
-output "tunnel_only_services" {
-  description = "Services volontairement liés à 127.0.0.1 (non exposés par le NSG) : accès via tunnel SSH, ex. `ssh -L 8443:localhost:8443 -i keys/<vm>_id_rsa <user>@<ip>`"
-  value = join(", ", [
-    "code-server:8443", "MinIO console:9001", "Metabase:3001", "pgAdmin:5050",
-    "Redpanda:9092", "cAdvisor:8085", "Loki:3100", "CyberChef:8001",
-    "DVWA:8081 (cybersecurity/fullstack)", "Juice Shop:8082 (cybersecurity/fullstack)", "WebGoat:8083 (cybersecurity/fullstack)"
-  ])
+output "tools_urls" {
+  description = "URL publiques des outils web (accessibles depuis allowed_ssh_cidr uniquement). Certains outils (Streamlit, MLflow, Prefect, Dask) doivent d'abord être lancés sur la VM : voir le dashboard."
+  value = merge(
+    {
+      "code-server" = "http://${azurerm_public_ip.pip.ip_address}:8443"
+      "cAdvisor"    = "http://${azurerm_public_ip.pip.ip_address}:8085"
+    },
+    local.profile_dataops ? {
+      "MinIO console"       = "http://${azurerm_public_ip.pip.ip_address}:9001"
+      "MinIO API (S3)"      = "http://${azurerm_public_ip.pip.ip_address}:9000"
+      "Metabase"            = "http://${azurerm_public_ip.pip.ip_address}:3001"
+      "pgAdmin"             = "http://${azurerm_public_ip.pip.ip_address}:5050"
+      "Streamlit (à lancer)" = "http://${azurerm_public_ip.pip.ip_address}:8501"
+      "MLflow (à lancer)"    = "http://${azurerm_public_ip.pip.ip_address}:5000"
+      "Prefect (à lancer)"   = "http://${azurerm_public_ip.pip.ip_address}:4200"
+      "Dask (à lancer)"      = "http://${azurerm_public_ip.pip.ip_address}:8787"
+    } : {},
+    local.profile_cybersecurity ? {
+      "CyberChef"  = "http://${azurerm_public_ip.pip.ip_address}:8001"
+      "DVWA"       = "http://${azurerm_public_ip.pip.ip_address}:8081"
+      "Juice Shop" = "http://${azurerm_public_ip.pip.ip_address}:8082"
+      "WebGoat"    = "http://${azurerm_public_ip.pip.ip_address}:8083/WebGoat"
+    } : {}
+  )
 }
 
 output "allowed_ssh_cidr_effective" {

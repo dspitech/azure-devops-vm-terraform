@@ -146,3 +146,19 @@ EOT
     error_message = "allowed_ssh_cidr doit être \"auto\", \"*\", ou un CIDR valide (ex: \"90.12.34.56/32\")."
   }
 }
+
+variable "extra_open_ports" {
+  description = <<EOT
+Ports TCP supplémentaires à ouvrir dans le NSG (restreints à allowed_ssh_cidr),
+pour d'autres outils que vous lancez vous-même sur la VM. Exemple : ["8000", "8080"].
+Les ports des outils fournis (Streamlit, MLflow, MinIO, DVWA...) sont déjà ouverts
+automatiquement selon le profil. Pensez à `sudo ufw allow <port>/tcp` sur la VM.
+EOT
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for p in var.extra_open_ports : can(regex("^[0-9]{1,5}$", p)) ? (tonumber(p) >= 1 && tonumber(p) <= 65535) : false])
+    error_message = "extra_open_ports doit contenir des numéros de port valides (1-65535), sous forme de chaînes. Exemple : [\"8000\", \"8080\"]."
+  }
+}

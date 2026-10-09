@@ -53,6 +53,15 @@ locals {
   profile_dataops       = var.vm_profile == "dataops" || var.vm_profile == "fullstack"
   profile_cybersecurity = var.vm_profile == "cybersecurity" || var.vm_profile == "fullstack"
 
+  # ─── Ports des outils web (un seul endroit, repris dans network.tf) ───
+  # Chaque outil ouvre son port « naturel », qu'il soit démarré par défaut
+  # (conteneur Docker) ou à lancer à la main (Streamlit, MLflow...). Ces ports
+  # sont toujours restreints à effective_ssh_cidr, jamais ouverts à Internet.
+  tool_ports_common = ["8443", "8085"]                                  # code-server, cAdvisor
+  tool_ports_dataops = ["9000", "9001", "3001", "5050",                 # MinIO API+console, Metabase, pgAdmin
+    "8501", "5000", "4200", "8787"]                                     # Streamlit, MLflow, Prefect, Dask (lancés à la main)
+  tool_ports_cyber = ["8001", "8081", "8082", "8083", "9091"]           # CyberChef, DVWA, Juice Shop, WebGoat, WebWolf
+
   # En-tête injecté avant le script cloud-init : transmet à la VM les
   # valeurs choisies côté Terraform (nom d'utilisateur, mots de passe
   # générés, numéro de LUN du disque de données, profil) sans avoir à
@@ -65,6 +74,8 @@ locals {
     export PORTAINER_ADMIN_PASSWORD="${random_password.portainer.result}"
     export DATA_DISK_LUN="${local.data_disk_lun}"
     export VM_PROFILE="${var.vm_profile}"
+    export VM_NAME="${var.vm_name}"
+    export VM_PUBLIC_IP="${azurerm_public_ip.pip.ip_address}"
   EOT
 
   # Le fichier install.sh a lui-même un shebang en première ligne ; on

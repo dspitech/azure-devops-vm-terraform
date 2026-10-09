@@ -26,7 +26,7 @@
 - [Architecture](#architecture)
 - [Démarrage rapide](#démarrage-rapide)
 - [Accéder aux services](#5-accéder-aux-services)
-- [Services en tunnel SSH uniquement](#services-en-tunnel-ssh-uniquement-non-exposés-dans-le-nsg)
+- [Outils web sur l'IP publique](#outils-web-sur-lip-publique-ports-ouverts-pour-votre-ip)
 - [Logiciels installés automatiquement](#logiciels-installés-automatiquement)
 - [Sécurité et réseau](#sécurité-et-réseau)
 - [Coût estimé](#coût-estimé-azure-students--100an-de-crédit)
@@ -47,7 +47,7 @@ Ce projet s'adresse aux étudiants et aux professionnels qui souhaitent disposer
 En quelques minutes, Terraform déploie sur Azure une machine virtuelle Ubuntu 22.04 LTS entièrement préconfigurée, couvrant les besoins suivants :
 
 - **DevOps et CI/CD** : Docker, Kubernetes (kubectl/Helm/k9s/kind/k3s), Terraform, Ansible, Vault, ArgoCD, GitHub Actions, sécurité IaC (Checkov/tfsec/gitleaks/semgrep) et bien d'autres.
-- **Pentest et sécurité offensive** : Metasploit, Nuclei, ffuf, sqlmap, Hydra, Amass, suite ProjectDiscovery, et des cibles d'entraînement (DVWA, Juice Shop, WebGoat) isolées en tunnel SSH.
+- **Pentest et sécurité offensive** : Metasploit, Nuclei, ffuf, sqlmap, Hydra, Amass, suite ProjectDiscovery, et des cibles d'entraînement (DVWA, Juice Shop, WebGoat) accessibles uniquement depuis votre IP.
 - **DataOps et Data Science** : JupyterLab, Spark, dbt, pandas, scikit-learn, DuckDB, Streamlit, MinIO, Metabase et les principaux SDKs cloud.
 - **SRE et monitoring** : Prometheus, Grafana, Loki/Promtail, cAdvisor, Node Exporter, Trivy et fail2ban préconfigurés.
 - **Productivité** : code-server (VS Code web), lazygit/lazydocker, et un tableau de bord web qui s'adapte automatiquement au profil choisi.
@@ -327,33 +327,51 @@ Sinon, les services sont accessibles directement (remplacer `<IP>` par l'IP publ
 
 > **Sécurité** : tous ces ports sont restreints par défaut à l'IP publique détectée automatiquement au moment du `terraform apply` (`allowed_ssh_cidr = "auto"`), à l'exception du tableau de bord (port 80) qui est volontairement public - il n'affiche que des liens et un inventaire des logiciels installés (versions), aucun secret ni information sensible. Si votre IP change ensuite, mettez à jour `terraform.tfvars` avec la nouvelle IP (ou ré-appliquez pour redétecter) puis relancez `terraform apply`.
 
-### Services en tunnel SSH uniquement (non exposés dans le NSG)
+### Outils web sur l'IP publique (ports ouverts pour votre IP)
 
-Certains services sont volontairement liés à `127.0.0.1` sur la VM et ne
-sont **jamais** ouverts dans le NSG, le plus souvent parce qu'ils n'ont pas
-d'authentification forte native (code-server) ou parce que ce sont des
-cibles volontairement vulnérables (DVWA, Juice Shop, WebGoat). Le tableau
-de bord web les liste avec une pastille « tunnel SSH » et une commande
-prête à copier. Accès via un tunnel SSH local :
+Tous les outils web sont joignables sur **l'IP publique de la VM** (le
+tableau de bord affiche donc `http://<IP publique>:<port>`, jamais
+`127.0.0.1`). Les ports sont ouverts à **trois niveaux** : le service écoute
+sur `0.0.0.0`, le pare-feu UFW de la VM l'autorise et le NSG Azure le laisse
+passer, **uniquement depuis `allowed_ssh_cidr`** (votre IP, détectée
+automatiquement).
 
-```bash
-ssh -L 8443:localhost:8443 -i keys/devops-pro-vm_id_rsa devopsadmin@<IP>
-# puis ouvrez http://127.0.0.1:8443 dans votre navigateur
+Les ports des outils **installés mais non démarrés par défaut** (Streamlit,
+MLflow, Prefect, Dask) sont eux aussi déjà ouverts : il suffit de lancer
+l'outil sur la VM avec la commande affichée dans le tableau de bord.
+
+| Outil | Port | Profil requis | Démarrage / notes |
+|---|---|---|---|
+| code-server | 8443 | tous | Auto. VS Code web, mot de passe = `terraform output portainer_admin_password` |
+| cAdvisor | 8085 | tous | Auto. Métriques conteneurs |
+| MinIO | 9001 (console) / 9000 (API S3) | `dataops` / `fullstack` | Auto. `minioadmin` / mot de passe Portainer |
+| Metabase | 3001 | `dataops` / `fullstack` | Auto. Configuration au premier accès |
+| pgAdmin | 5050 | `dataops` / `fullstack` | Auto. `admin@devops-vm.local` / mot de passe Portainer |
+| Streamlit | 8501 | `dataops` / `fullstack` | **À lancer** : `streamlit run app.py --server.address 0.0.0.0 --server.port 8501` |
+| MLflow | 5000 | `dataops` / `fullstack` | **À lancer** : `mlflow ui --host 0.0.0.0 --port 5000` |
+| Prefect | 4200 | `dataops` / `fullstack` | **À lancer** : `prefect server start --host 0.0.0.0 --port 4200` |
+| Dask (dashboard) | 8787 | `dataops` / `fullstack` | **À lancer** : `dask scheduler --dashboard-address :8787` |
+| CyberChef | 8001 | `cybersecurity` / `fullstack` | Auto |
+| DVWA | 8081 | `cybersecurity` / `fullstack` | Auto. Cible d'entraînement - usage légal uniquement |
+| OWASP Juice Shop | 8082 | `cybersecurity` / `fullstack` | Auto. Cible d'entraînement - usage légal uniquement |
+| WebGoat | 8083 (`/WebGoat`) / 9091 (WebWolf) | `cybersecurity` / `fullstack` | Auto. Cible d'entraînement - usage légal uniquement |
+
+Pour ouvrir un autre port (outil que vous lancez vous-même), ajoutez-le dans
+`terraform.tfvars` puis relancez `terraform apply` :
+
+```hcl
+extra_open_ports = ["8000", "8080"]
 ```
 
-| Service | Port (loopback) | Profil requis | Notes |
-|---|---|---|---|
-| code-server | 8443 | tous | VS Code web, mot de passe = `terraform output portainer_admin_password` |
-| MinIO Console | 9001 | `dataops` / `fullstack` | `minioadmin` / mot de passe Portainer |
-| Metabase | 3001 | `dataops` / `fullstack` | BI, configuration au premier accès |
-| pgAdmin | 5050 | `dataops` / `fullstack` | `admin@devops-vm.local` / mot de passe Portainer |
-| cAdvisor | 8085 | tous | Métriques conteneurs en temps réel |
-| CyberChef | 8001 | `cybersecurity` / `fullstack` | Décodage/encodage/analyse de données |
-| DVWA | 8081 | `cybersecurity` / `fullstack` | Cible d'entraînement - usage légal uniquement |
-| OWASP Juice Shop | 8082 | `cybersecurity` / `fullstack` | Cible d'entraînement - usage légal uniquement |
-| WebGoat | 8083 | `cybersecurity` / `fullstack` | Cible d'entraînement - usage légal uniquement |
+et, côté VM : `sudo ufw allow 8000/tcp`.
 
-Voir aussi `terraform output tunnel_only_services` pour la liste complète.
+> **Attention** : DVWA, Juice Shop et WebGoat sont volontairement
+> vulnérables, et code-server / MLflow / Streamlit / Prefect / Dask n'ont pas
+> d'authentification forte (ou aucune) et circulent en HTTP. Ne mettez
+> **jamais** `allowed_ssh_cidr = "*"` : ils seraient exposés à tout Internet.
+> Si votre IP change, relancez `terraform apply` pour réautoriser la nouvelle.
+
+Voir aussi `terraform output tools_urls` pour la liste des URL.
 
 ---
 
@@ -425,8 +443,8 @@ Voir aussi `terraform output tunnel_only_services` pour la liste complète.
 | Prometheus | http://\<IP\>:9090 | Collecte et stockage de métriques time-series |
 | Grafana | http://\<IP\>:3000 (admin / mot de passe généré, cf. `terraform output grafana_admin_password`) | Dashboards de visualisation - préconfigurés avec Node Exporter |
 | Node Exporter | Port 9100 (interne VNet) | Métriques système CPU, RAM, disque, réseau |
-| cAdvisor | 127.0.0.1:8085 (tunnel SSH) | Métriques d'utilisation des conteneurs Docker |
-| Loki + Promtail | 127.0.0.1:3100 (tunnel SSH, backend uniquement) | Agrégation des logs système (`/var/log/*log`), consultable depuis Grafana |
+| cAdvisor | http://\\<IP\\>:8085 | Métriques d'utilisation des conteneurs Docker |
+| Loki + Promtail | 127.0.0.1:3100 (interne, backend de Grafana) | Agrégation des logs système (`/var/log/*log`), consultable depuis Grafana |
 
 ### Bases de données
 
@@ -434,16 +452,16 @@ Clients en ligne de commande : `postgresql-client`, `redis-tools`, `sqlite3`, `u
 
 Conteneurs Docker démarrés automatiquement avec données persistées dans `/data/docker-volumes/` :
 
-| Service | Port (loopback) | Credentials | Image | Profil requis |
+| Service | Port | Credentials | Image | Profil requis |
 |---|---|---|---|---|
 | PostgreSQL 16 | 127.0.0.1:5432 | postgres / postgres | postgres:16-alpine | tous |
 | Redis 7 | 127.0.0.1:6379 | - | redis:7-alpine | tous |
-| MinIO | 127.0.0.1:9000 (API) / :9001 (console, tunnel SSH) | minioadmin / mot de passe Portainer | minio/minio | `dataops` / `fullstack` |
-| pgAdmin | 127.0.0.1:5050 (tunnel SSH) | admin@devops-vm.local / mot de passe Portainer | dpage/pgadmin4 | `dataops` / `fullstack` |
-| Metabase | 127.0.0.1:3001 (tunnel SSH) | config au 1er accès | metabase/metabase | `dataops` / `fullstack` |
+| MinIO | :9000 (API) / :9001 (console) | minioadmin / mot de passe Portainer | quay.io/minio/minio (repli : binaire officiel) | `dataops` / `fullstack` |
+| pgAdmin | :5050 | admin@devops-vm.local / mot de passe Portainer | dpage/pgadmin4 | `dataops` / `fullstack` |
+| Metabase | :3001 | config au 1er accès | metabase/metabase | `dataops` / `fullstack` |
 | Redpanda | 127.0.0.1:9092 | - | redpandadata/redpanda | `dataops` / `fullstack` |
 
-> Les conteneurs écoutent sur `127.0.0.1` uniquement pour éviter toute exposition publique, même si le NSG Azure filtre déjà au niveau réseau. MySQL et MongoDB ne sont volontairement pas déployés dans cette version (retirés du script d'installation) ; ajoutez-les vous-même dans `cloud-init/install.sh` si vous en avez besoin.
+> PostgreSQL, Redis, Redpanda et Loki écoutent sur `127.0.0.1` uniquement (jamais exposés). MinIO, pgAdmin et Metabase écoutent sur toutes les interfaces, filtrés par le NSG (votre IP uniquement). MySQL et MongoDB ne sont volontairement pas déployés dans cette version (retirés du script d'installation) ; ajoutez-les vous-même dans `cloud-init/install.sh` si vous en avez besoin.
 
 ### Python et DataOps
 
@@ -500,7 +518,7 @@ Conteneurs Docker démarrés automatiquement avec données persistées dans `/da
 | wfuzz | Fuzzing web générique |
 | impacket / NetExec | Exploitation et énumération Active Directory / SMB |
 | OWASP ZAP | Scanner de vulnérabilités applicatives web (image Docker) |
-| CyberChef | Décodage/encodage/analyse de données - 127.0.0.1:8001 (tunnel SSH) |
+| CyberChef | Décodage/encodage/analyse de données - http://\\<IP\\>:8001 |
 | binwalk | Analyse et extraction de firmwares/images binaires |
 | radare2 | Framework de reverse engineering |
 | volatility3 | Analyse forensique de mémoire (RAM dumps) |
@@ -511,11 +529,11 @@ Répertoire de travail dédié : `/data/pentest/{recon,exploits,reports,loot}`
 
 ### Cibles d'entraînement (volontairement vulnérables)
 
-Isolées sur `127.0.0.1`, jamais exposées via le NSG - accès uniquement par
-tunnel SSH (voir [Services en tunnel SSH uniquement](#services-en-tunnel-ssh-uniquement-non-exposés-dans-le-nsg)).
+Accessibles sur l'IP publique, mais ouvertes dans le NSG et UFW **uniquement pour votre IP**
+(voir [Outils web sur l'IP publique](#outils-web-sur-lip-publique-ports-ouverts-pour-votre-ip)).
 Usage pédagogique/légal uniquement.
 
-| Outil | Port (loopback) | Description |
+| Outil | Port | Description |
 |---|---|---|
 | DVWA | 8081 | Application web volontairement vulnérable (classique, par niveau de difficulté) |
 | OWASP Juice Shop | 8082 | Application e-commerce moderne volontairement vulnérable |
@@ -559,7 +577,7 @@ Usage pédagogique/légal uniquement.
 - `fzf`, `bat`, `eza` (remplaçant de `exa`), `fd`, `ripgrep`, `btop`, `ncdu`, `direnv`, `tldr`
 - `tmux`, `vim` (configuré avec numérotation et coloration), `htop`, `tree`, `jq`, `yq`
 - Alias prédéfinis : `k` (kubectl), `d` (docker), `dc` (docker compose), `tf` (terraform), `tg` (terragrunt)
-- **code-server** : VS Code dans le navigateur - 127.0.0.1:8443 (tunnel SSH)
+- **code-server** : VS Code dans le navigateur - http://\<IP\>:8443
 - **lazygit** / **lazydocker** : interfaces terminal pour Git et Docker
 - **restic** : sauvegarde de `/data` (installé, planification à configurer selon vos besoins)
 - **unattended-upgrades** : mises à jour de sécurité système automatiques
@@ -588,11 +606,15 @@ dépend parfois du profil `vm_profile` choisi) :
 | 170 | 8200 | Vault | `allowed_ssh_cidr` | `devops` / `fullstack` |
 | 180 | 9100 | Node Exporter | CIDR VNet interne uniquement | tous |
 | 190 | 5432, 6379 | PostgreSQL, Redis | CIDR VNet interne uniquement | tous |
+| 210 | 8443, 8085 | code-server, cAdvisor | `allowed_ssh_cidr` | tous |
+| 220 | 9000, 9001, 3001, 5050, 8501, 5000, 4200, 8787 | MinIO, Metabase, pgAdmin, Streamlit, MLflow, Prefect, Dask | `allowed_ssh_cidr` | `dataops` / `fullstack` |
+| 230 | 8001, 8081, 8082, 8083, 9091 | CyberChef, DVWA, Juice Shop, WebGoat, WebWolf | `allowed_ssh_cidr` | `cybersecurity` / `fullstack` |
+| 240 | `extra_open_ports` | Vos propres ports | `allowed_ssh_cidr` | si renseigné |
 | 4096 | `*` | Deny all | - | - |
 
 > Le pare-feu UFW dans la VM est aligné sur ces mêmes règles (défense en profondeur) et s'adapte lui aussi au profil actif.
 
-> **Services ajoutés depuis la dernière mise à jour** (code-server, MinIO, Metabase, pgAdmin, cAdvisor, Loki, CyberChef, DVWA, Juice Shop, WebGoat...) : **aucun n'est ajouté au NSG**. Ils écoutent uniquement sur `127.0.0.1` à l'intérieur de la VM et ne sont accessibles que via un tunnel SSH - voir [Services en tunnel SSH uniquement](#services-en-tunnel-ssh-uniquement-non-exposés-dans-le-nsg). C'est volontaire, en particulier pour les cibles d'entraînement volontairement vulnérables.
+> **Outils web** (code-server, MinIO, Metabase, pgAdmin, cAdvisor, CyberChef, DVWA, Juice Shop, WebGoat, Streamlit, MLflow, Prefect, Dask) : leurs ports sont ouverts dans le NSG **uniquement pour `allowed_ssh_cidr`** (règles 210-240), même quand l'outil n'est pas démarré par défaut. Voir [Outils web sur l'IP publique](#outils-web-sur-lip-publique-ports-ouverts-pour-votre-ip).
 
 **Autres protections en place** :
 
@@ -732,9 +754,8 @@ ss -tulnp
 sudo systemctl start k3s
 sudo k3s kubectl get nodes
 
-# Accéder à un service en tunnel SSH (ex: code-server)
-ssh -L 8443:localhost:8443 -i keys/devops-pro-vm_id_rsa devopsadmin@<IP>
-# puis ouvrir http://127.0.0.1:8443
+# Ouvrir un outil web (ex: code-server) : directement sur l'IP publique
+# http://<IP>:8443   (voir aussi : terraform output tools_urls)
 
 # Éteindre la VM depuis Azure (économise le crédit)
 az vm deallocate -g rg-devops-pro-vm -n devops-pro-vm
@@ -813,18 +834,28 @@ docker start postgres redis
 docker logs postgres --tail 50
 ```
 
-### Un service tunnel SSH (code-server, MinIO, DVWA...) reste injoignable
+### Un outil web (code-server, MinIO, DVWA...) est « hors ligne » dans le tableau de bord
 
 ```bash
-# Ces services écoutent sur 127.0.0.1 à l'intérieur de la VM, pas sur l'IP
-# publique : un tunnel SSH est obligatoire, le NSG ne les ouvre jamais.
-ssh -L <port>:localhost:<port> -i keys/devops-pro-vm_id_rsa devopsadmin@<IP>
-# puis ouvrir http://127.0.0.1:<port> dans VOTRE navigateur local
+# 1) Votre IP a-t-elle changé depuis le déploiement ? Le NSG n'autorise que
+#    l'IP détectée à ce moment-là (terraform output allowed_ssh_cidr_effective).
+terraform apply          # réautorise votre IP actuelle (allowed_ssh_cidr = "auto")
 
-# Vérifier que le conteneur/service tourne bien côté VM
+# 2) Côté VM : le conteneur / service tourne-t-il et écoute-t-il sur 0.0.0.0 ?
 docker ps | grep <nom-service>
 sudo systemctl status code-server
+sudo ss -tulnp | grep <port>
+
+# 3) Outils « Non démarré » (Streamlit, MLflow, Prefect, Dask) : normal, lancez-les
+#    avec la commande affichée dans le tableau de bord (le port est déjà ouvert).
 ```
+
+### `permission denied ... /var/run/docker.sock`
+
+Les groupes d'une session SSH sont figés à la connexion : une session ouverte
+**avant** la fin de l'installation n'a pas le groupe `docker`. Le script
+applique maintenant une ACL sur le socket (accès immédiat) ; sinon,
+reconnectez-vous ou lancez `newgrp docker`.
 
 ### `terraform apply` refuse le déploiement avec une erreur de précondition
 

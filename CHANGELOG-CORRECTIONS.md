@@ -3,6 +3,22 @@
 Ce fichier résume l'audit complet du projet et toutes les corrections
 apportées. Vous pouvez le supprimer une fois pris connaissance de son contenu.
 
+## Mise à jour — dashboard, ports, MinIO, Docker
+
+| Problème constaté | Correction |
+|---|---|
+| Boutons du dashboard peu professionnels (dégradé violet, texte « Copier la commande tunnel » sur 3 lignes) | Dashboard refait : liste groupée par catégorie, boutons de taille uniforme (« Ouvrir » + copie en icône), état en direct, filtre, thème clair/sombre automatique, adapté au mobile |
+| Bouton « Copier » sans effet | `navigator.clipboard` n'existe pas en HTTP : repli `execCommand("copy")` ajouté |
+| `http://127.0.0.1:...` affiché au lieu de l'IP publique | Plus aucun lien en `127.0.0.1` : l'IP publique est injectée par Terraform (`VM_PUBLIC_IP`), avec repli sur les métadonnées Azure puis sur l'hôte du navigateur |
+| Ports des outils fermés (tunnel SSH obligatoire) | Services liés à `0.0.0.0`, ports ouverts dans UFW et dans le NSG (règles 210-240), uniquement pour `allowed_ssh_cidr`. Ports des outils non démarrés par défaut (Streamlit 8501, MLflow 5000, Prefect 4200, Dask 8787) ouverts aussi. Variable `extra_open_ports` pour vos propres ports |
+| `pull access denied for minio/minio` | L'image n'existe plus sur Docker Hub : essai `quay.io/minio/minio`, puis une version figée, puis repli sur le binaire officiel (service systemd) |
+| `permission denied ... /var/run/docker.sock` | Session SSH ouverte avant l'ajout au groupe `docker` (groupes figés à la connexion). ACL posée sur le socket pour l'utilisateur admin, réappliquée à chaque démarrage de Docker |
+| ClamAV : `Failed to lock the log file ... freshclam.log` | `clamav-freshclam` est arrêté le temps de la mise à jour manuelle, puis relancé |
+| `paquet apt indisponible : osquery` | Ajout du dépôt officiel `pkg.osquery.io`, avec repli sur le `.deb` de la release GitHub |
+| Description Jupyter annonçant un « token inclus » alors qu'il ne l'était pas | Texte corrigé (le token reste hors de la page publique du port 80) ; WebGoat ouvre désormais `/WebGoat` |
+
+---
+
 ## 🔴 Bug critique — cause probable de l'échec d'automatisation
 
 **Tous les fichiers du projet, y compris `cloud-init/install.sh`, étaient

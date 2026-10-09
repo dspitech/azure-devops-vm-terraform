@@ -32,6 +32,8 @@ JUPYTER_TOKEN="${JUPYTER_TOKEN:-}"
 PORTAINER_ADMIN_PASSWORD="${PORTAINER_ADMIN_PASSWORD:-ChangeMe123456}"
 DATA_DISK_LUN="${DATA_DISK_LUN:-10}"
 VM_PROFILE="${VM_PROFILE:-fullstack}"
+VM_NAME="${VM_NAME:-$(hostname)}"
+VM_PUBLIC_IP="${VM_PUBLIC_IP:-}"
 
 # -- Profils --------------------------------------------------
 # "base"     : socle toujours installe, quel que soit le profil.
@@ -53,6 +55,27 @@ DATA_MOUNT="/data"
 
 ok()  { echo "   $1"; }
 err() { echo "    $1 (non bloquant)"; }
+
+# Rend le socket Docker utilisable par ADMIN_USER immediatement, y compris dans
+# une session SSH ouverte AVANT l'ajout au groupe docker : les groupes d'un
+# processus sont figes a la connexion, `usermod -aG` n'agit qu'a la suivante
+# (symptome : "permission denied ... /var/run/docker.sock"). L'ACL est aussi
+# reappliquee a chaque demarrage de docker.service.
+fix_docker_access() {
+  id "$ADMIN_USER" >/dev/null 2>&1 || return 0
+  usermod -aG docker "$ADMIN_USER" 2>/dev/null || true
+  command -v setfacl >/dev/null 2>&1 || apt-get install -y -qq acl >/dev/null 2>&1 || true
+  if [ -S /var/run/docker.sock ]; then
+    setfacl -m "u:${ADMIN_USER}:rw" /var/run/docker.sock 2>/dev/null || true
+  fi
+  mkdir -p /etc/systemd/system/docker.service.d
+  cat > /etc/systemd/system/docker.service.d/10-admin-acl.conf << ACLEOF
+[Service]
+ExecStartPost=-/usr/bin/setfacl -m u:${ADMIN_USER}:rw /var/run/docker.sock
+ACLEOF
+  systemctl daemon-reload 2>/dev/null || true
+  ok "Acces Docker active pour $ADMIN_USER (sans reconnexion)"
+}
 
 # pip silencieux - jamais bloquant
 pip_install() {
@@ -112,7 +135,7 @@ apt-get install -y -qq \
   rsync netcat-openbsd socat httpie \
   python3 python3-pip python3-venv python3-dev \
   libssl-dev libffi-dev \
-  fail2ban ufw \
+  fail2ban ufw acl \
   zsh fzf bat fd-find ripgrep || err "Certains paquets apt ont echoue"
 
 # Upgrade pip + typing_extensions immediatement apres installation systeme
@@ -320,6 +343,7 @@ systemctl enable docker
 systemctl start docker
 # Attendre que le socket Docker soit pret
 timeout 30 bash -c 'until docker info &>/dev/null; do sleep 2; done'
+fix_docker_access
 
 # -- Seul Portainer est demarre comme conteneur au boot ------
 docker volume create portainer_data || true
@@ -395,15 +419,14 @@ pip_install pre-commit tldr && ok "pre-commit + tldr (Python) installes" || err 
 
 apt-get install -y restic 2>/dev/null && ok "restic installe (sauvegarde /data)" || err "restic non installe"
 
-# code-server (VS Code dans le navigateur), restreint au compte admin, sur
-# 127.0.0.1 uniquement : accessible via un tunnel SSH `ssh -L 8443:localhost:8443`
-# plutot qu'expose directement sur Internet (pas d'auth forte native).
+# code-server (VS Code dans le navigateur) : ecoute sur 0.0.0.0:8443, protege par
+# mot de passe. Le port 8443 n'est ouvert (NSG + UFW) que pour votre IP.
 CODE_SERVER_PASSWORD="${CODE_SERVER_PASSWORD:-$PORTAINER_ADMIN_PASSWORD}"
 curl -fsSL https://code-server.dev/install.sh | sh 2>/dev/null \
   && ok "code-server installe" || err "code-server non installe"
 sudo -u "$ADMIN_USER" mkdir -p "$HOME_DIR/.config/code-server"
 cat > "$HOME_DIR/.config/code-server/config.yaml" << EOF
-bind-addr: 127.0.0.1:8443
+bind-addr: 0.0.0.0:8443
 auth: password
 password: ${CODE_SERVER_PASSWORD}
 cert: false
@@ -425,7 +448,7 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 systemctl enable --now code-server 2>/dev/null \
-  && ok "code-server demarre sur 127.0.0.1:8443 (tunnel SSH requis, mdp = mot de passe Portainer)" \
+  && ok "code-server demarre sur :8443 (mdp = mot de passe Portainer)" \
   || err "code-server non demarre"
 
 ok "[3b/12] Outils communs installes"
@@ -863,11 +886,11 @@ docker run -d \
 docker run -d \
   --name cadvisor \
   --restart always \
-  -p 127.0.0.1:8085:8080 \
+  -p 8085:8080 \
   -v /:/rootfs:ro -v /var/run:/var/run:ro -v /sys:/sys:ro \
   -v /var/lib/docker/:/var/lib/docker:ro \
   gcr.io/cadvisor/cadvisor:latest \
-  && ok "cAdvisor demarre sur 127.0.0.1:8085" || err "cAdvisor non demarre"
+  && ok "cAdvisor demarre sur :8085" || err "cAdvisor non demarre"
 
 mkdir -p /etc/loki /etc/promtail "$DATA_MOUNT/docker-volumes/loki"
 cat > /etc/loki/loki.yml << 'EOF'
@@ -1037,35 +1060,73 @@ pip_install duckdb streamlit dvc "great_expectations" prefect \
   || err "Certaines libs data non installees"
 
 # MinIO - stockage objet compatible S3
-docker volume create minio_data || true
-docker run -d \
-  --name minio \
-  --restart always \
-  -p 127.0.0.1:9000:9000 -p 127.0.0.1:9001:9001 \
-  -e MINIO_ROOT_USER=minioadmin \
-  -e MINIO_ROOT_PASSWORD="${PORTAINER_ADMIN_PASSWORD}" \
-  -v minio_data:/data \
-  minio/minio server /data --console-address ":9001" \
-  && ok "MinIO demarre sur 127.0.0.1:9000 (API) / :9001 (console, minioadmin / mdp Portainer)" \
-  || err "MinIO non demarre"
+# L'image Docker Hub "minio/minio" n'existe plus ("pull access denied") : on
+# essaie quay.io, puis une version figee, puis le binaire officiel (systemd).
+docker volume create minio_data >/dev/null 2>&1 || true
+MINIO_IMAGE=""
+for img in quay.io/minio/minio:latest \
+           quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z \
+           minio/minio:RELEASE.2025-04-22T22-12-26Z; do
+  if docker pull "$img" >/dev/null 2>&1; then MINIO_IMAGE="$img"; break; fi
+done
+if [ -n "$MINIO_IMAGE" ]; then
+  docker run -d \
+    --name minio \
+    --restart always \
+    -p 9000:9000 -p 9001:9001 \
+    -e MINIO_ROOT_USER=minioadmin \
+    -e MINIO_ROOT_PASSWORD="${PORTAINER_ADMIN_PASSWORD}" \
+    -v minio_data:/data \
+    "$MINIO_IMAGE" server /data --console-address ":9001" \
+    && ok "MinIO demarre ($MINIO_IMAGE) sur :9000 (API) / :9001 (console, minioadmin / mdp Portainer)" \
+    || err "MinIO non demarre"
+else
+  err "Aucune image MinIO recuperable - repli sur le binaire officiel"
+  useradd -r -s /usr/sbin/nologin minio-user 2>/dev/null || true
+  mkdir -p "$DATA_MOUNT/minio" && chown minio-user:minio-user "$DATA_MOUNT/minio"
+  if curl -fsSL --max-time 180 -o /usr/local/bin/minio https://dl.min.io/server/minio/release/linux-amd64/minio; then
+    chmod +x /usr/local/bin/minio
+    cat > /etc/systemd/system/minio.service << MINIOEOF
+[Unit]
+Description=MinIO
+After=network-online.target
+
+[Service]
+User=minio-user
+Environment=MINIO_ROOT_USER=minioadmin
+Environment=MINIO_ROOT_PASSWORD=${PORTAINER_ADMIN_PASSWORD}
+ExecStart=/usr/local/bin/minio server $DATA_MOUNT/minio --address :9000 --console-address :9001
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+MINIOEOF
+    systemctl daemon-reload
+    systemctl enable --now minio 2>/dev/null \
+      && ok "MinIO (binaire) demarre sur :9000 (API) / :9001 (console, minioadmin / mdp Portainer)" \
+      || err "MinIO non demarre"
+  else
+    err "MinIO non installe (image et binaire indisponibles)"
+  fi
+fi
 
 # Metabase - BI legere
 docker run -d \
   --name metabase \
   --restart always \
-  -p 127.0.0.1:3001:3000 \
+  -p 3001:3000 \
   metabase/metabase:latest \
-  && ok "Metabase demarre sur 127.0.0.1:3001" || err "Metabase non demarre"
+  && ok "Metabase demarre sur :3001" || err "Metabase non demarre"
 
 # pgAdmin - administration PostgreSQL
 docker run -d \
   --name pgadmin \
   --restart always \
-  -p 127.0.0.1:5050:80 \
+  -p 5050:80 \
   -e PGADMIN_DEFAULT_EMAIL=admin@devops-vm.local \
   -e PGADMIN_DEFAULT_PASSWORD="${PORTAINER_ADMIN_PASSWORD}" \
   dpage/pgadmin4:latest \
-  && ok "pgAdmin demarre sur 127.0.0.1:5050 (admin@devops-vm.local / mdp Portainer)" \
+  && ok "pgAdmin demarre sur :5050 (admin@devops-vm.local / mdp Portainer)" \
   || err "pgAdmin non demarre"
 
 # Redpanda - Kafka-compatible, bien plus leger que Kafka+Zookeeper
@@ -1165,6 +1226,16 @@ ufw allow 3000/tcp comment 'Grafana'
 ufw allow 9090/tcp comment 'Prometheus'
 ufw allow 9443/tcp comment 'Portainer'
 should_run "devops" && ufw allow 8200/tcp comment 'Vault'
+# Ports des outils web : memes ports que le NSG (voir network.tf). Les services
+# hors Docker (code-server, outils lances a la main) en ont besoin ; ceux
+# publies par Docker contournent UFW mais sont filtres par le NSG.
+for p in 8443 8085; do ufw allow "$p/tcp" comment 'outil web'; done
+if should_run "dataops"; then
+  for p in 9000 9001 3001 5050 8501 5000 4200 8787; do ufw allow "$p/tcp" comment 'outil data'; done
+fi
+if should_run "cybersecurity"; then
+  for p in 8001 8081 8082 8083 9091; do ufw allow "$p/tcp" comment 'outil cyber'; done
+fi
 ufw --force enable
 ok "UFW configure"
 
@@ -1346,35 +1417,57 @@ docker pull zaproxy/zap-stable:latest >/dev/null 2>&1 \
 docker run -d \
   --name cyberchef \
   --restart always \
-  -p 127.0.0.1:8001:80 \
+  -p 8001:80 \
   mpepping/cyberchef:latest \
-  && ok "CyberChef demarre sur 127.0.0.1:8001" || err "CyberChef non demarre"
+  && ok "CyberChef demarre sur :8001" || err "CyberChef non demarre"
 
 pip_install volatility3 && ok "volatility3 installe" || err "volatility3 non installe"
 apt_each radare2 && ok "radare2 installe" || err "radare2 non installe"
 
 # -- Cibles d'entrainement volontairement vulnerables ---------
-# Isolees sur 127.0.0.1 : jamais exposees via le NSG, acces uniquement par
-# tunnel SSH (ssh -L 8080:localhost:8080 ...). Usage pedagogique uniquement.
-docker run -d --name dvwa --restart always -p 127.0.0.1:8081:80 vulnerables/web-dvwa \
-  && ok "DVWA demarre sur 127.0.0.1:8081 (cible d'entrainement, usage legal uniquement)" \
+# Accessibles sur l'IP publique, mais le NSG (network.tf) et UFW ne laissent
+# passer que VOTRE IP (allowed_ssh_cidr). Ne mettez jamais allowed_ssh_cidr = "*"
+# avec ce profil. Usage pedagogique uniquement.
+docker run -d --name dvwa --restart always -p 8081:80 vulnerables/web-dvwa \
+  && ok "DVWA demarre sur :8081 (cible d'entrainement, usage legal uniquement)" \
   || err "DVWA non demarre"
 
-docker run -d --name juice-shop --restart always -p 127.0.0.1:8082:3000 bkimminich/juice-shop \
-  && ok "OWASP Juice Shop demarre sur 127.0.0.1:8082 (cible d'entrainement)" \
+docker run -d --name juice-shop --restart always -p 8082:3000 bkimminich/juice-shop \
+  && ok "OWASP Juice Shop demarre sur :8082 (cible d'entrainement)" \
   || err "Juice Shop non demarre"
 
-docker run -d --name webgoat --restart always -p 127.0.0.1:8083:8080 -p 127.0.0.1:9091:9090 webgoat/webgoat \
-  && ok "WebGoat demarre sur 127.0.0.1:8083 (cible d'entrainement)" \
+docker run -d --name webgoat --restart always -p 8083:8080 -p 9091:9090 webgoat/webgoat \
+  && ok "WebGoat demarre sur :8083/WebGoat (cible d'entrainement)" \
   || err "WebGoat non demarre"
 
 # -- Cote defense (blue team) ----------------------------------
 apt_each lynis clamav auditd \
   && ok "Lynis / ClamAV / auditd installes" || err "Certains outils blue team non installes"
-freshclam --quiet 2>/dev/null || err "Mise a jour des signatures ClamAV echouee"
+# Le service clamav-freshclam detient deja le verrou du log apres l'installation
+# ("Failed to lock the log file") : on l'arrete le temps de la mise a jour.
+systemctl stop clamav-freshclam 2>/dev/null || true
+freshclam --quiet 2>/dev/null && ok "Signatures ClamAV a jour" || err "Mise a jour des signatures ClamAV echouee"
+systemctl enable --now clamav-freshclam 2>/dev/null || true
 
-curl -s https://install.osquery.io/ 2>/dev/null | bash -s -- 2>/dev/null \
-  || apt_each osquery
+# osquery n'est pas dans les depots Ubuntu : depot officiel, sinon .deb GitHub.
+install_osquery() {
+  install -m 0755 -d /etc/apt/keyrings
+  if curl -fsSL --max-time 30 https://pkg.osquery.io/deb/pubkey.gpg -o /etc/apt/keyrings/osquery.asc 2>/dev/null; then
+    echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/osquery.asc] https://pkg.osquery.io/deb deb main" \
+      > /etc/apt/sources.list.d/osquery.list
+    apt-get update -qq >/dev/null 2>&1
+    apt-get install -y -qq osquery >/dev/null 2>&1 && return 0
+  fi
+  local ver
+  ver=$(gh_latest osquery/osquery | tr -d v)
+  [ -n "$ver" ] || return 1
+  curl -fsSL --max-time 120 -o /tmp/osquery.deb \
+    "https://github.com/osquery/osquery/releases/download/${ver}/osquery_${ver}-1.linux_amd64.deb" \
+    && dpkg -i /tmp/osquery.deb >/dev/null 2>&1
+  rm -f /tmp/osquery.deb
+  command -v osqueryi >/dev/null 2>&1
+}
+install_osquery || true
 command -v osqueryi >/dev/null 2>&1 && ok "osquery installe" || err "osquery non installe"
 
 curl -s https://install.crowdsec.net | bash 2>/dev/null \
@@ -1497,7 +1590,7 @@ cat << 'MOTD_HEAD'
   |   Portainer     : https://<IP>:9443 (admin / cf. `terraform output portainer_admin_password`) |
   |   PostgreSQL    : localhost:5432    (postgres/postgres)|
   |   Redis         : localhost:6379                       |
-  |   code-server   : 127.0.0.1:8443 (tunnel SSH, mdp Portainer) |
+  |   code-server   : http://<IP>:8443 (mdp Portainer)      |
 MOTD_HEAD
 
 if should_run "devops"; then
@@ -1518,9 +1611,9 @@ cat << 'MOTD_DATAOPS'
   +==========================================================+
   |   Jupyter       : http://<IP>:8888  (token: cf. `terraform output jupyter_token`) |
   |   DuckDB        : duckdb (CLI)                         |
-  |   MinIO         : 127.0.0.1:9001 (console, minioadmin / mdp Portainer) |
-  |   Metabase      : 127.0.0.1:3001                       |
-  |   pgAdmin       : 127.0.0.1:5050 (admin@devops-vm.local / mdp Portainer) |
+  |   MinIO         : http://<IP>:9001 (minioadmin / mdp Portainer) |
+  |   Metabase      : http://<IP>:3001                     |
+  |   pgAdmin       : http://<IP>:5050 (admin@devops-vm.local / mdp Portainer) |
   |   Redpanda      : 127.0.0.1:9092 (Kafka-compatible)     |
 MOTD_DATAOPS
 fi
@@ -1534,9 +1627,9 @@ cat << 'MOTD_CYBER'
   |   Wordlists     : /opt/SecLists / rockyou.txt         |
   |   Pentest dir   : /data/pentest/                      |
   |   Recon         : subfinder / httpx / naabu / dnsx / katana / feroxbuster |
-  |   Cibles (tunnel SSH) : DVWA :8081 / Juice Shop :8082 / WebGoat :8083 |
+  |   Cibles        : DVWA :8081 / Juice Shop :8082 / WebGoat :8083/WebGoat |
   |   Blue team     : lynis / clamav / auditd / osquery / crowdsec |
-  |   CyberChef     : 127.0.0.1:8001                       |
+  |   CyberChef     : http://<IP>:8001                     |
 MOTD_CYBER
 fi
 
@@ -1592,7 +1685,7 @@ echo "-- Espace disque -----------------------------------"
 df -h / /data 2>/dev/null || df -h /
 echo ""
 echo "-- Ports en ecoute ---------------------------------"
-ss -tulnp | grep -E ':(22|80|443|3000|8080|8200|8888|9090|9100|9443)\s' 2>/dev/null || true
+ss -tulnp | grep -E ':(22|80|443|3000|3001|4200|5000|5050|8001|8081|8082|8083|8085|8200|8443|8501|8787|8888|9000|9001|9090|9100|9443)\s' 2>/dev/null || true
 echo ""
 STATUS
 chmod +x /usr/local/bin/devops-status
@@ -1667,6 +1760,16 @@ V_GO=$(go version 2>/dev/null | awk '{print $3}') || true
 V_NODE=$(node --version 2>/dev/null) || true
 V_JAVA=$(java -version 2>&1 | grep -oP '(?<=version ")[0-9][^"]*' | head -1) || true
 
+# IP publique reelle de la VM, affichee dans le dashboard a la place de 127.0.0.1.
+# Injectee par Terraform ; sinon metadonnees Azure (IMDS), sinon service externe.
+if [ -z "${VM_PUBLIC_IP:-}" ]; then
+  VM_PUBLIC_IP=$(curl -s --max-time 5 -H "Metadata:true" \
+    "http://169.254.169.254/metadata/instance/network/interface/0/ipv4/ipAddress/0/publicIpAddress?api-version=2021-02-01&format=text" 2>/dev/null || true)
+fi
+[[ "${VM_PUBLIC_IP:-}" =~ ^[0-9]+(\.[0-9]+){3}$ ]] || VM_PUBLIC_IP=$(curl -s --max-time 5 https://ifconfig.me/ip 2>/dev/null || true)
+[[ "${VM_PUBLIC_IP:-}" =~ ^[0-9]+(\.[0-9]+){3}$ ]] || VM_PUBLIC_IP=""
+ok "IP publique pour le dashboard : ${VM_PUBLIC_IP:-inconnue, repli sur hote du navigateur}"
+
 mkdir -p /var/www/html
 cat > /var/www/html/index.html << 'DASHBOARD_EOF'
 <!DOCTYPE html>
@@ -1674,294 +1777,293 @@ cat > /var/www/html/index.html << 'DASHBOARD_EOF'
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DevOps VM - Tableau de bord</title>
+<meta name="color-scheme" content="light dark">
+<title>Tableau de bord de la VM</title>
 <style>
   :root{
-    --bg:#0a0b10; --panel:rgba(22,25,38,.6); --panel-solid:#161926;
-    --border:rgba(255,255,255,.08); --border-hover:rgba(255,255,255,.18);
-    --text:#eef0f6; --muted:#8b8fa8; --muted-2:#5c6079;
-    --accent:#7c5cff; --accent-2:#22d3ee;
-    --up:#34d399; --down:#fb7185; --checking:#f5b942;
-    --radius:18px;
+    color-scheme:light dark;
+    --bg:#f5f6f8; --surface:#fff; --surface-2:#eef0f3; --line:#dde1e7; --line-strong:#c4cad3;
+    --text:#1b2027; --muted:#5b6573; --faint:#8a93a0;
+    --up:#1a7f37; --down:#cf222e; --warn:#9a6700;
+    --radius:8px;
+    --sans:system-ui,-apple-system,"Segoe UI Variable","Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+    --mono:ui-monospace,"Cascadia Mono","SF Mono",Menlo,Consolas,monospace;
   }
-  body[data-profile="devops"]      { --accent:#60a5fa; --accent-2:#22d3ee; }
-  body[data-profile="dataops"]     { --accent:#34d399; --accent-2:#a3e635; }
-  body[data-profile="cybersecurity"]{ --accent:#fb7185; --accent-2:#f59e0b; }
-  body[data-profile="fullstack"]   { --accent:#a78bfa; --accent-2:#22d3ee; }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#12161c; --surface:#1a1f26; --surface-2:#232932; --line:#2b323c; --line-strong:#3b4350;
+      --text:#e7eaef; --muted:#9aa4b2; --faint:#6f7885;
+      --up:#3fb950; --down:#f85149; --warn:#d29922;
+    }
+  }
+  body{ --accent:var(--a-l); --on-accent:#fff; }
+  @media (prefers-color-scheme:dark){ body{ --accent:var(--a-d); --on-accent:#0b1118; } }
+  body[data-profile="devops"]       { --a-l:#0969da; --a-d:#58a6ff; }
+  body[data-profile="dataops"]      { --a-l:#0b7a61; --a-d:#3ccfa6; }
+  body[data-profile="cybersecurity"]{ --a-l:#bc4c00; --a-d:#f0883e; }
+  body[data-profile="fullstack"]    { --a-l:#5b4bd5; --a-d:#8b9bff; }
 
-  *{box-sizing:border-box;}
-  html{scroll-behavior:smooth;}
-  body{
-    margin:0; min-height:100vh; color:var(--text); background:var(--bg);
-    font-family:"Segoe UI",system-ui,-apple-system,Roboto,sans-serif;
-    overflow-x:hidden;
-    -webkit-font-smoothing:antialiased;
-  }
+  *{ box-sizing:border-box; }
+  [hidden]{ display:none !important; }
+  body{ margin:0; background:var(--bg); color:var(--text); font:14px/1.5 var(--sans); -webkit-font-smoothing:antialiased; }
+  .wrap{ max-width:1120px; margin:0 auto; padding:32px 24px 56px; }
+  :focus-visible{ outline:2px solid var(--accent); outline-offset:2px; }
+  code{ font-family:var(--mono); font-size:12.5px; }
 
-  /* -- Fond anime (mesh gradient) --------------------------- */
-  .bg-mesh{ position:fixed; inset:0; z-index:0; overflow:hidden; }
-  .bg-mesh span{
-    position:absolute; width:46vw; height:46vw; border-radius:50%;
-    filter:blur(90px); opacity:.35; will-change:transform;
+  /* En-tete */
+  .top{ display:flex; justify-content:space-between; align-items:flex-start; gap:16px; flex-wrap:wrap; }
+  h1{ margin:0; font-size:24px; font-weight:650; letter-spacing:-.015em; }
+  .sub{ margin:4px 0 0; color:var(--muted); }
+  .pill{
+    display:inline-flex; align-items:center; gap:6px; padding:4px 12px; border-radius:999px;
+    border:1px solid var(--line-strong); background:var(--surface); font-size:13px; color:var(--muted);
   }
-  .bg-mesh span:nth-child(1){ background:var(--accent); top:-15%; left:-10%; animation:float1 22s ease-in-out infinite; }
-  .bg-mesh span:nth-child(2){ background:var(--accent-2); bottom:-20%; right:-10%; animation:float2 26s ease-in-out infinite; }
-  .bg-mesh span:nth-child(3){ background:#ec4899; top:40%; left:60%; width:32vw; height:32vw; opacity:.18; animation:float3 30s ease-in-out infinite; }
-  @keyframes float1{ 0%,100%{transform:translate(0,0)} 50%{transform:translate(6vw,8vh)} }
-  @keyframes float2{ 0%,100%{transform:translate(0,0)} 50%{transform:translate(-5vw,-6vh)} }
-  @keyframes float3{ 0%,100%{transform:translate(0,0) scale(1)} 50%{transform:translate(-4vw,5vh) scale(1.1)} }
+  .pill b{ color:var(--accent); font-weight:650; }
 
-  .wrap{ position:relative; z-index:1; max-width:1040px; margin:0 auto; padding:48px 24px 72px; }
+  /* Bloc de connexion */
+  .conn{
+    margin-top:20px; display:grid; grid-template-columns:minmax(0,1fr) minmax(0,2fr); gap:1px;
+    background:var(--line); border:1px solid var(--line); border-radius:var(--radius); overflow:hidden;
+  }
+  .field{ background:var(--surface); padding:12px 16px; display:grid; grid-template-columns:1fr auto; gap:2px 12px; align-items:center; min-width:0; }
+  .flabel{ grid-column:1/-1; font-size:12.5px; color:var(--muted); }
+  .field code{ font-size:14px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
-  /* -- Header ----------------------------------------------- */
-  header{ margin-bottom:32px; animation:fadeInUp .6s ease both; }
-  .title-row{ display:flex; align-items:center; gap:14px; }
-  .logo{
-    width:46px; height:46px; border-radius:13px; display:flex; align-items:center; justify-content:center;
-    background:linear-gradient(135deg,var(--accent),var(--accent-2)); flex-shrink:0;
-    box-shadow:0 8px 24px -8px color-mix(in srgb, var(--accent) 60%, transparent);
+  /* Barre d'etat + filtre */
+  .bar{ margin-top:20px; display:flex; justify-content:space-between; align-items:center; gap:12px 20px; flex-wrap:wrap; }
+  .summary{ display:flex; align-items:center; gap:10px; font-weight:550; }
+  .summary small{ color:var(--faint); font-weight:400; font-size:12.5px; }
+  .search{ position:relative; }
+  .search svg{ position:absolute; left:10px; top:50%; width:15px; height:15px; margin-top:-7.5px; stroke:var(--faint); fill:none; stroke-width:2; stroke-linecap:round; pointer-events:none; }
+  .search input{
+    height:34px; width:260px; max-width:100%; padding:0 12px 0 32px; border-radius:6px; border:1px solid var(--line-strong);
+    background:var(--surface); color:var(--text); font:inherit;
   }
-  h1{
-    font-size:28px; margin:0; letter-spacing:-.02em; font-weight:700;
-    background:linear-gradient(120deg,#fff, var(--muted) 140%);
-    -webkit-background-clip:text; background-clip:text; color:transparent;
-  }
-  .sub{ color:var(--muted); font-size:14.5px; margin:6px 0 0 60px; }
+  .search input::placeholder{ color:var(--faint); }
 
-  .badges{ display:flex; gap:10px; flex-wrap:wrap; margin:20px 0 0 60px; }
-  .badge{
-    display:inline-flex; align-items:center; gap:8px; font-size:12.5px; font-weight:500;
-    padding:7px 14px; border-radius:999px; border:1px solid var(--border);
-    background:var(--panel); backdrop-filter:blur(16px);
-  }
-  .badge b{ color:var(--text); text-transform:capitalize; font-weight:600; }
-  .badge.profile{ color:var(--accent-2); }
-  .badge .pulse-dot{
-    width:7px; height:7px; border-radius:50%; background:var(--up);
-    box-shadow:0 0 0 0 rgba(52,211,153,.6); animation:pulse-ring 2s infinite;
-  }
-
-  /* -- Grid ------------------------------------------------- */
-  .grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(255px,1fr)); gap:16px; margin-top:28px; }
-
-  .card{
-    position:relative; background:var(--panel); border:1px solid var(--border); border-radius:var(--radius);
-    padding:20px; backdrop-filter:blur(18px); overflow:hidden;
-    opacity:0; transform:translateY(16px);
-    animation:fadeInUp .55s cubic-bezier(.2,.8,.2,1) forwards;
-    transition:border-color .25s ease, transform .25s ease, box-shadow .25s ease;
-  }
-  .card:hover{
-    border-color:var(--border-hover); transform:translateY(-3px);
-    box-shadow:0 18px 40px -20px rgba(0,0,0,.55);
-  }
-  .card::before{
-    content:""; position:absolute; inset:0; border-radius:var(--radius); padding:1px;
-    background:linear-gradient(135deg, color-mix(in srgb, var(--accent) 45%, transparent), transparent 55%);
-    -webkit-mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-    -webkit-mask-composite:xor; mask-composite:exclude; pointer-events:none; opacity:.7;
+  .notice{
+    margin-top:16px; padding:12px 16px; border-radius:var(--radius); border:1px solid var(--warn);
+    background:color-mix(in srgb, var(--warn) 10%, var(--surface)); font-size:13px;
   }
 
-  .card-top{ display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; }
-  .card-id{ display:flex; align-items:center; gap:11px; }
-  .icon-box{
-    width:36px; height:36px; border-radius:10px; display:flex; align-items:center; justify-content:center;
-    background:rgba(255,255,255,.06); border:1px solid var(--border); flex-shrink:0;
+  /* Groupes de services */
+  .group{ margin-top:28px; }
+  .group h2{ margin:0 0 8px; font-size:14px; font-weight:650; display:flex; gap:8px; align-items:baseline; }
+  .group h2 span{ color:var(--faint); font-weight:500; }
+  .list{ background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); overflow:hidden; }
+  .svc{
+    display:grid; grid-template-columns:36px minmax(0,1fr) 240px 150px auto;
+    gap:4px 16px; align-items:center; padding:12px 16px;
   }
-  .icon-box svg{ width:18px; height:18px; stroke:var(--text); }
-  .card-title{ font-weight:600; font-size:15px; }
+  .svc + .svc{ border-top:1px solid var(--line); }
+  .ic{ width:36px; height:36px; border-radius:8px; display:flex; align-items:center; justify-content:center; background:var(--surface-2); border:1px solid var(--line); }
+  .ic svg{ width:18px; height:18px; stroke:var(--text); fill:none; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
+  .name{ font-weight:600; }
+  .desc{ color:var(--muted); font-size:13px; }
+  .cmd{ margin-top:6px; display:flex; align-items:center; gap:8px; background:var(--surface-2); border:1px solid var(--line); border-radius:6px; padding:3px 4px 3px 10px; max-width:100%; }
+  .cmd code{ flex:1; min-width:0; overflow-wrap:anywhere; padding:3px 0; color:var(--muted); }
+  .url{ font-family:var(--mono); font-size:12px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
-  .status{ display:flex; align-items:center; gap:7px; font-size:11.5px; color:var(--muted); }
-  .dot{
-    width:9px; height:9px; border-radius:50%; background:var(--muted-2); flex-shrink:0;
-    transition:background .3s ease;
-  }
-  .dot.checking{ background:var(--checking); animation:blink 1s infinite; }
-  .dot.up{ background:var(--up); box-shadow:0 0 0 0 rgba(52,211,153,.55); animation:pulse-ring 1.8s infinite; }
-  .dot.down{ background:var(--down); box-shadow:0 0 10px 0 rgba(251,113,133,.5); }
-  .dot.tunnel{ background:var(--accent-2); }
-  .tunnel-note{
-    font-size:11.5px; color:var(--muted); background:rgba(255,255,255,.04);
-    border:1px solid var(--border); border-radius:8px; padding:6px 9px; margin-top:8px;
-  }
+  .st{ display:inline-flex; align-items:center; gap:8px; font-size:13px; color:var(--muted); white-space:nowrap; }
+  .dot{ width:8px; height:8px; border-radius:50%; background:var(--faint); flex-shrink:0; }
+  .st.up{ color:var(--text); }   .st.up .dot{ background:var(--up); }
+  .st.down .dot{ background:var(--down); }
+  .st.warn .dot{ background:var(--warn); }
+  .st.checking .dot{ animation:blink 1.1s ease-in-out infinite; }
+  @keyframes blink{ 50%{ opacity:.3; } }
 
-  .desc{ color:var(--muted); font-size:13px; line-height:1.55; min-height:40px; }
-
-  .row{ display:flex; gap:8px; margin-top:14px; }
+  /* Boutons */
+  .act{ display:flex; gap:6px; justify-content:flex-end; }
   .btn{
-    flex:1; text-align:center; text-decoration:none; font-size:13px; font-weight:600;
-    padding:9px 10px; border-radius:10px; border:1px solid var(--border);
-    background:rgba(255,255,255,.03); color:var(--text); cursor:pointer;
-    transition:all .2s ease; display:inline-flex; align-items:center; justify-content:center; gap:6px;
+    height:32px; padding:0 12px; display:inline-flex; align-items:center; justify-content:center; gap:7px;
+    border-radius:6px; border:1px solid var(--line-strong); background:var(--surface); color:var(--text);
+    font:inherit; font-size:13px; font-weight:550; line-height:1; white-space:nowrap; text-decoration:none; cursor:pointer;
+    transition:background-color .15s ease, border-color .15s ease;
   }
-  .btn.primary{
-    background:linear-gradient(135deg, var(--accent), var(--accent-2)); border:none; color:#0a0b10;
-  }
-  .btn:hover{ transform:translateY(-1px); filter:brightness(1.08); }
-  .btn:active{ transform:translateY(0); }
-  .btn svg{ width:13px; height:13px; }
+  .btn:hover{ background:var(--surface-2); }
+  .btn.primary{ background:var(--accent); border-color:var(--accent); color:var(--on-accent); }
+  .btn.primary:hover{ background:color-mix(in srgb, var(--accent) 86%, #000); }
+  .btn svg{ width:14px; height:14px; fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }
+  .btn.icon{ width:32px; padding:0; }
+  .btn.sm{ width:26px; height:26px; padding:0; flex-shrink:0; align-self:flex-start; border-color:transparent; background:transparent; color:var(--muted); }
+  .btn.sm:hover{ background:var(--line); color:var(--text); }
 
-  .url-line{
-    margin-top:10px; font-size:11px; color:var(--muted-2); font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
-    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
-  }
+  /* Inventaire */
+  .inv-title{ margin:40px 0 12px; font-size:14px; font-weight:650; }
+  .inv{ display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:24px 32px; }
+  .inv h3{ margin:0 0 6px; font-size:13px; font-weight:650; }
+  .inv ul{ list-style:none; margin:0; padding:0; border-top:1px solid var(--line); }
+  .inv li{ display:flex; justify-content:space-between; gap:12px; padding:5px 0; border-bottom:1px solid var(--line); font-size:13px; }
+  .inv li span:last-child{ font-family:var(--mono); font-size:12px; color:var(--muted); text-align:right; }
+  .inv li.na{ color:var(--faint); }
+  .inv li.na span:last-child{ color:var(--faint); }
 
-  .empty{
-    grid-column:1/-1; text-align:center; padding:48px 20px; color:var(--muted);
-    border:1px dashed var(--border); border-radius:var(--radius); font-size:14px;
-  }
+  .empty{ margin-top:28px; padding:32px; text-align:center; color:var(--muted); border:1px dashed var(--line-strong); border-radius:var(--radius); }
+  footer{ margin-top:40px; color:var(--faint); font-size:12.5px; line-height:1.7; }
+  footer code{ color:var(--muted); }
 
-  .section-title{
-    font-size:15px; font-weight:600; color:var(--muted); text-transform:uppercase;
-    letter-spacing:.08em; margin:44px 0 16px; padding-top:8px; border-top:1px solid var(--border);
+  .toast{
+    position:fixed; left:50%; bottom:24px; transform:translateX(-50%); padding:8px 16px; border-radius:6px;
+    background:var(--text); color:var(--bg); font-size:13px; font-weight:550; opacity:0; pointer-events:none; transition:opacity .15s ease;
   }
+  .toast.show{ opacity:1; }
 
-  .tool-category{
-    background:var(--panel); border:1px solid var(--border); border-radius:var(--radius);
-    padding:16px 18px; margin-bottom:14px; backdrop-filter:blur(18px);
-    opacity:0; transform:translateY(12px); animation:fadeInUp .5s ease forwards;
+  @media (max-width:900px){
+    .conn{ grid-template-columns:1fr; }
+    .svc{ grid-template-columns:36px minmax(0,1fr) auto; }
+    .svc .url, .svc .st{ grid-column:2/-1; }
+    .svc .act{ grid-column:2/-1; justify-content:flex-start; margin-top:6px; }
   }
-  .tool-category h3{
-    margin:0 0 12px; font-size:13.5px; font-weight:600; color:var(--accent-2);
-    display:flex; align-items:center; gap:8px;
+  @media (max-width:520px){
+    .wrap{ padding:20px 14px 40px; }
+    .search, .search input{ width:100%; }
+    .svc{ padding:12px; gap:6px 12px; }
   }
-  .tool-category h3 .cat-dot{ width:7px; height:7px; border-radius:50%; background:var(--accent); }
-  .tool-list{ display:flex; flex-wrap:wrap; gap:8px; }
-  .tool-chip{
-    display:inline-flex; align-items:baseline; gap:6px; font-size:12.5px;
-    padding:6px 12px; border-radius:9px; background:rgba(255,255,255,.03); border:1px solid var(--border);
-    transition:border-color .2s ease, transform .2s ease;
-  }
-  .tool-chip:hover{ border-color:var(--border-hover); transform:translateY(-1px); }
-  .tool-chip .t-name{ font-weight:600; color:var(--text); }
-  .tool-chip .t-version{ color:var(--muted); font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px; }
-  .tool-chip.na{ opacity:.45; }
-
-  @keyframes fadeInUp{ from{opacity:0; transform:translateY(16px);} to{opacity:1; transform:translateY(0);} }
-  @keyframes blink{ 0%,100%{opacity:1;} 50%{opacity:.35;} }
-  @keyframes pulse-ring{
-    0%{ box-shadow:0 0 0 0 color-mix(in srgb, var(--up) 55%, transparent); }
-    70%{ box-shadow:0 0 0 8px transparent; }
-    100%{ box-shadow:0 0 0 0 transparent; }
-  }
-
-  footer{
-    margin-top:44px; color:var(--muted-2); font-size:12px; text-align:center; line-height:1.8;
-    animation:fadeInUp .6s ease .3s both;
-  }
-  code{ background:rgba(255,255,255,.06); padding:2px 7px; border-radius:6px; font-size:11.5px; color:var(--accent-2); }
-
-  ::selection{ background:color-mix(in srgb, var(--accent) 40%, transparent); }
-
-  @media (max-width:480px){
-    .sub, .badges{ margin-left:0; }
-    .title-row{ flex-direction:column; align-items:flex-start; }
-  }
+  @media (prefers-reduced-motion:reduce){ .st.checking .dot{ animation:none; } .btn, .toast{ transition:none; } }
 </style>
 </head>
 <body>
-
-<div class="bg-mesh"><span></span><span></span><span></span></div>
-
 <div class="wrap">
-  <header>
-    <div class="title-row">
-      <div class="logo">
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#0a0b10" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="3" y="4" width="18" height="13" rx="2"></rect>
-          <path d="M8 21h8M12 17v4"></path>
-        </svg>
-      </div>
-      <h1>DevOps VM</h1>
+  <header class="top">
+    <div>
+      <h1 id="vm-name">VM</h1>
+      <p class="sub">Services installés et état en direct</p>
     </div>
-    <div class="sub">Tableau de bord des services installes sur cette machine</div>
-    <div class="badges">
-      <span class="badge profile"><span class="pulse-dot"></span>Profil actif : <b id="profile-name">-</b></span>
-      <span class="badge" id="count-badge">- services</span>
-      <span class="badge" id="clock-badge">--:--:--</span>
-    </div>
+    <span class="pill">Profil <b id="profile-name">-</b></span>
   </header>
 
-  <div class="grid" id="grid"></div>
+  <section class="conn" aria-label="Connexion à la VM">
+    <div class="field">
+      <span class="flabel">Adresse IP publique</span>
+      <code id="ip"></code>
+      <button class="btn icon" id="ip-copy" aria-label="Copier l'adresse IP" title="Copier l'adresse IP"></button>
+    </div>
+    <div class="field">
+      <span class="flabel">Connexion SSH</span>
+      <code id="ssh"></code>
+      <button class="btn icon" id="ssh-copy" aria-label="Copier la commande SSH" title="Copier la commande SSH"></button>
+    </div>
+  </section>
 
-  <h2 class="section-title">Logiciels installes</h2>
-  <div id="tools-wrap"></div>
+  <div class="bar">
+    <div class="summary" aria-live="polite">
+      <span class="st checking" id="sum-st"><span class="dot"></span><span id="sum-txt">Vérification en cours…</span></span>
+      <small id="sum-time"></small>
+    </div>
+    <label class="search">
+      <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+      <input id="filter" type="search" placeholder="Filtrer les services" aria-label="Filtrer les services" autocomplete="off">
+    </label>
+  </div>
+
+  <div class="notice" id="notice" hidden>
+    Aucun service n'est joignable depuis ce poste. L'accès réseau est limité à l'adresse IP utilisée au déploiement :
+    si elle a changé, relancez <code>terraform apply</code> (variable <code>allowed_ssh_cidr</code>).
+  </div>
+
+  <main id="services"></main>
+  <div class="empty" id="no-match" hidden>Aucun service ne correspond à ce filtre.</div>
+
+  <h2 class="inv-title">Logiciels installés</h2>
+  <div class="inv" id="tools-wrap"></div>
 
   <footer>
-    Verification d'etat effectuee depuis votre navigateur, sans donnee envoyee a un tiers .
-    Identifiants generes par Terraform : <code>terraform output</code> .
-    Details complets : <code>devops-status</code> en SSH
+    Les vérifications d'état sont faites depuis votre navigateur ; aucune donnée n'est envoyée à un tiers.
+    Identifiants générés : <code>terraform output</code>. Détails sur la VM : <code>devops-status</code>.
   </footer>
 </div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script>
 const PROFILE = PLACEHOLDER_PROFILE;
 const ADMIN_USER = PLACEHOLDER_ADMIN_USER;
-const HOST = window.location.hostname;
+const VM_NAME = PLACEHOLDER_VM_NAME || "<vm_name>";
+const PUBLIC_IP = PLACEHOLDER_PUBLIC_IP;
+// Toujours l'IP publique de la VM (injectee par Terraform) ; a defaut, l'hote
+// utilise pour ouvrir cette page. Jamais 127.0.0.1.
+const HOST = PUBLIC_IP || window.location.hostname;
+const PROFILE_LABELS = { devops:"DevOps", dataops:"DataOps", cybersecurity:"Cybersécurité", fullstack:"Fullstack" };
 document.body.setAttribute("data-profile", PROFILE);
 
 const ICONS = {
-  grafana: '<path d="M3 3v18h18"/><path d="M7 15l4-6 3 3 5-8"/>',
-  prometheus: '<path d="M12 2a7 7 0 0 0-7 7c0 3 2 5 3 7l1 3h6l1-3c1-2 3-4 3-7a7 7 0 0 0-7-7z"/><path d="M9 15h6"/>',
-  portainer: '<path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/>',
-  jupyter: '<circle cx="12" cy="6" r="2.2"/><circle cx="6" cy="16" r="2.2"/><circle cx="18" cy="16" r="2.2"/><path d="M8 15c1.5-2 6.5-2 8 0"/>',
-  vault: '<rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
-  codeserver: '<path d="M8 4L2 12l6 8"/><path d="M16 4l6 8-6 8"/>',
-  minio: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
-  metabase: '<rect x="3" y="12" width="4" height="8"/><rect x="10" y="7" width="4" height="13"/><rect x="17" y="3" width="4" height="17"/>',
-  pgadmin: '<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/>',
-  cyberchef: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/>',
-  cadvisor: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
-  dvwa: '<path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-4z"/>',
-  juiceshop: '<path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-4z"/>',
-  webgoat: '<path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-4z"/>'
+  grafana:'<path d="M3 3v18h18"/><path d="M7 15l4-6 3 3 5-8"/>',
+  prometheus:'<path d="M12 2a7 7 0 0 0-7 7c0 3 2 5 3 7l1 3h6l1-3c1-2 3-4 3-7a7 7 0 0 0-7-7z"/><path d="M9 15h6"/>',
+  portainer:'<path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/>',
+  cadvisor:'<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
+  codeserver:'<path d="M8 4L2 12l6 8"/><path d="M16 4l6 8-6 8"/>',
+  vault:'<rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
+  jupyter:'<circle cx="12" cy="6" r="2.2"/><circle cx="6" cy="16" r="2.2"/><circle cx="18" cy="16" r="2.2"/><path d="M8 15c1.5-2 6.5-2 8 0"/>',
+  minio:'<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
+  metabase:'<rect x="3" y="12" width="4" height="8"/><rect x="10" y="7" width="4" height="13"/><rect x="17" y="3" width="4" height="17"/>',
+  pgadmin:'<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/>',
+  streamlit:'<path d="M3 17l9-5 9 5-9 5z"/><path d="M3 12l9-5 9 5"/><path d="M3 7l9-5 9 5"/>',
+  mlflow:'<path d="M3 12h4l3-8 4 16 3-8h4"/>',
+  prefect:'<path d="M5 4h4v6H5zM15 4h4v6h-4zM10 14h4v6h-4z"/><path d="M7 10v2h10v-2M12 12v2"/>',
+  dask:'<circle cx="6" cy="12" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="18" cy="18" r="2"/><path d="M8 11l8-4M8 13l8 4"/>',
+  cyberchef:'<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/>',
+  dvwa:'<path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-4z"/><path d="M12 8v4M12 16h.01"/>',
+  juiceshop:'<circle cx="12" cy="14" r="7"/><path d="M12 7c0-2 1.5-3.5 3.5-4"/>',
+  webgoat:'<path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-4z"/><path d="M9 12l2 2 4-4"/>'
 };
 const GENERIC_ICON = '<circle cx="12" cy="12" r="9"/>';
+const COPY_PATHS = '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>';
+const EXT_PATHS = '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14L21 3"/>';
 
-// tunnelOnly:true = service lie a 127.0.0.1 sur la VM, jamais ouvert dans le
-// NSG. Accessible uniquement via un tunnel SSH ; "Ouvrir" pointe alors vers
-// 127.0.0.1:<port> sur VOTRE machine (valide une fois le tunnel etabli), et
-// aucune verification d'etat n'est tentee depuis le navigateur (toujours
-// injoignable en direct, ce qui serait trompeur).
+const G_MON = "Supervision", G_DEV = "Développement", G_DATA = "Données", G_SEC = "Sécurité";
+
+// Tous les services sont joignables sur l'IP publique (ports ouverts dans le
+// NSG pour votre IP, dans UFW, et services lies a 0.0.0.0).
+// manual:true = installe mais non demarre par defaut : "cmd" le lance sur la VM
+// (le port est deja ouvert).
 const SERVICES = [
-  { key:"grafana", name:"Grafana", port:3000, https:false, enabled:true, tunnelOnly:false,
-    desc:"Dashboards de monitoring. Identifiant admin, mot de passe genere par Terraform." },
-  { key:"prometheus", name:"Prometheus", port:9090, https:false, enabled:true, tunnelOnly:false,
-    desc:"Moteur de metriques, source de donnees de Grafana." },
-  { key:"portainer", name:"Portainer", port:9443, https:true, enabled:true, tunnelOnly:false,
-    desc:"Interface de gestion Docker. Certificat auto-signe : acceptez l'avertissement au premier acces." },
-  { key:"jupyter", name:"JupyterLab", port:8888, https:false, enabled:PLACEHOLDER_DATAOPS, tunnelOnly:false,
-    desc:"Notebooks Python / data science. Lien avec token deja inclus." },
-  { key:"vault", name:"Vault", port:8200, https:false, enabled:PLACEHOLDER_DEVOPS, tunnelOnly:false,
-    desc:"Secrets management HashiCorp. Root token dans /root/.vault-init sur la VM." },
+  { key:"grafana", name:"Grafana", port:3000, group:G_MON, enabled:true,
+    desc:"Tableaux de bord de supervision. Compte admin, mot de passe généré par Terraform." },
+  { key:"prometheus", name:"Prometheus", port:9090, group:G_MON, enabled:true,
+    desc:"Moteur de métriques, source de données de Grafana." },
+  { key:"portainer", name:"Portainer", port:9443, https:true, group:G_MON, enabled:true,
+    desc:"Gestion des conteneurs Docker. Certificat auto-signé : acceptez l'avertissement au premier accès." },
+  { key:"cadvisor", name:"cAdvisor", port:8085, group:G_MON, enabled:true,
+    desc:"Utilisation des ressources par conteneur, en temps réel." },
 
-  { key:"codeserver", name:"code-server", port:8443, https:false, enabled:true, tunnelOnly:true,
-    desc:"VS Code dans le navigateur. Mot de passe = mot de passe Portainer." },
-  { key:"minio", name:"MinIO Console", port:9001, https:false, enabled:PLACEHOLDER_DATAOPS, tunnelOnly:true,
-    desc:"Stockage objet S3. Identifiant minioadmin, mot de passe Portainer." },
-  { key:"metabase", name:"Metabase", port:3001, https:false, enabled:PLACEHOLDER_DATAOPS, tunnelOnly:true,
-    desc:"BI / tableaux de bord sur vos bases de donnees. Configuration au premier acces." },
-  { key:"pgadmin", name:"pgAdmin", port:5050, https:false, enabled:PLACEHOLDER_DATAOPS, tunnelOnly:true,
-    desc:"Administration PostgreSQL. admin@devops-vm.local, mot de passe Portainer." },
-  { key:"cadvisor", name:"cAdvisor", port:8085, https:false, enabled:true, tunnelOnly:true,
-    desc:"Metriques d'utilisation des conteneurs Docker en temps reel." },
-  { key:"cyberchef", name:"CyberChef", port:8001, https:false, enabled:PLACEHOLDER_CYBER, tunnelOnly:true,
-    desc:"Couteau suisse pour decoder/encoder/analyser des donnees (analyse, forensic)." },
-  { key:"dvwa", name:"DVWA", port:8081, https:false, enabled:PLACEHOLDER_CYBER, tunnelOnly:true,
-    desc:"Cible d'entrainement volontairement vulnerable. Usage pedagogique/legal uniquement." },
-  { key:"juiceshop", name:"OWASP Juice Shop", port:8082, https:false, enabled:PLACEHOLDER_CYBER, tunnelOnly:true,
-    desc:"Cible d'entrainement volontairement vulnerable. Usage pedagogique/legal uniquement." },
-  { key:"webgoat", name:"WebGoat", port:8083, https:false, enabled:PLACEHOLDER_CYBER, tunnelOnly:true,
-    desc:"Cible d'entrainement volontairement vulnerable. Usage pedagogique/legal uniquement." }
+  { key:"codeserver", name:"code-server", port:8443, group:G_DEV, enabled:true,
+    desc:"VS Code dans le navigateur. Mot de passe : celui de Portainer." },
+  { key:"vault", name:"Vault", port:8200, group:G_DEV, enabled:PLACEHOLDER_DEVOPS,
+    desc:"Gestion des secrets HashiCorp. Root token dans /root/.vault-init sur la VM." },
+
+  { key:"jupyter", name:"JupyterLab", port:8888, group:G_DATA, enabled:PLACEHOLDER_DATAOPS,
+    desc:"Notebooks Python et data science. Jeton d'accès dans terraform output." },
+  { key:"minio", name:"MinIO", port:9001, group:G_DATA, enabled:PLACEHOLDER_DATAOPS,
+    desc:"Stockage objet S3 (console ; API sur le port 9000). Compte minioadmin, mot de passe de Portainer." },
+  { key:"metabase", name:"Metabase", port:3001, group:G_DATA, enabled:PLACEHOLDER_DATAOPS,
+    desc:"Analyse et tableaux de bord sur vos bases. Configuration au premier accès." },
+  { key:"pgadmin", name:"pgAdmin", port:5050, group:G_DATA, enabled:PLACEHOLDER_DATAOPS,
+    desc:"Administration PostgreSQL. Compte admin@devops-vm.local, mot de passe de Portainer." },
+  { key:"streamlit", name:"Streamlit", port:8501, group:G_DATA, enabled:PLACEHOLDER_DATAOPS, manual:true,
+    desc:"Applications de données en Python. À lancer sur la VM :",
+    cmd:"streamlit run app.py --server.address 0.0.0.0 --server.port 8501" },
+  { key:"mlflow", name:"MLflow", port:5000, group:G_DATA, enabled:PLACEHOLDER_DATAOPS, manual:true,
+    desc:"Suivi d'expériences de machine learning. À lancer sur la VM :",
+    cmd:"mlflow ui --host 0.0.0.0 --port 5000" },
+  { key:"prefect", name:"Prefect", port:4200, group:G_DATA, enabled:PLACEHOLDER_DATAOPS, manual:true,
+    desc:"Orchestration de pipelines. À lancer sur la VM :",
+    cmd:"prefect server start --host 0.0.0.0 --port 4200" },
+  { key:"dask", name:"Dask", port:8787, group:G_DATA, enabled:PLACEHOLDER_DATAOPS, manual:true,
+    desc:"Tableau de bord du calcul distribué. À lancer sur la VM :",
+    cmd:"dask scheduler --dashboard-address :8787" },
+
+  { key:"cyberchef", name:"CyberChef", port:8001, group:G_SEC, enabled:PLACEHOLDER_CYBER,
+    desc:"Décodage, encodage et analyse de données (forensic)." },
+  { key:"dvwa", name:"DVWA", port:8081, group:G_SEC, enabled:PLACEHOLDER_CYBER,
+    desc:"Cible d'entraînement volontairement vulnérable. Usage pédagogique et légal uniquement." },
+  { key:"juiceshop", name:"OWASP Juice Shop", port:8082, group:G_SEC, enabled:PLACEHOLDER_CYBER,
+    desc:"Cible d'entraînement volontairement vulnérable. Usage pédagogique et légal uniquement." },
+  { key:"webgoat", name:"WebGoat", port:8083, path:"/WebGoat", group:G_SEC, enabled:PLACEHOLDER_CYBER,
+    desc:"Cible d'entraînement volontairement vulnérable. Usage pédagogique et légal uniquement." }
 ];
 
-// Chaque outil : la version est celle reellement detectee sur CETTE VM au
-// moment de l'installation (chaine vide si non installe / injoignable).
-// "enabled" reprend les memes conditions que cloud-init/install.sh
-// (should_run) : la liste affichee correspond exactement a ce qui a ete
-// reellement installe pour le profil actif.
+// Version = celle reellement detectee sur CETTE VM a l'installation (vide si
+// non installe). "enabled" reprend les conditions de should_run() du script.
 const TOOLS = [
-  // Socle commun - toujours installe
   { category:"Socle commun", name:"Docker", version:PLACEHOLDER_V_DOCKER, enabled:true },
   { category:"Socle commun", name:"Git", version:PLACEHOLDER_V_GIT, enabled:true },
   { category:"Socle commun", name:"Python 3", version:PLACEHOLDER_V_PYTHON, enabled:true },
@@ -1970,7 +2072,6 @@ const TOOLS = [
   { category:"Socle commun", name:"lazydocker", version:PLACEHOLDER_V_LAZYDOCKER, enabled:true },
   { category:"Socle commun", name:"restic", version:PLACEHOLDER_V_RESTIC, enabled:true },
 
-  // DevOps & Cloud - profil devops / fullstack
   { category:"DevOps & Cloud", name:"kubectl", version:PLACEHOLDER_V_KUBECTL, enabled:PLACEHOLDER_DEVOPS },
   { category:"DevOps & Cloud", name:"Helm", version:PLACEHOLDER_V_HELM, enabled:PLACEHOLDER_DEVOPS },
   { category:"DevOps & Cloud", name:"k9s", version:PLACEHOLDER_V_K9S, enabled:PLACEHOLDER_DEVOPS },
@@ -1986,7 +2087,7 @@ const TOOLS = [
   { category:"DevOps & Cloud", name:"ArgoCD CLI", version:PLACEHOLDER_V_ARGOCD, enabled:PLACEHOLDER_DEVOPS },
   { category:"DevOps & Cloud", name:"Trivy", version:PLACEHOLDER_V_TRIVY, enabled:PLACEHOLDER_DEVOPS },
   { category:"DevOps & Cloud", name:"kustomize", version:PLACEHOLDER_V_KUSTOMIZE, enabled:PLACEHOLDER_DEVOPS },
-  { category:"DevOps & Cloud", name:"k3s (desactive)", version:PLACEHOLDER_V_K3S, enabled:PLACEHOLDER_DEVOPS },
+  { category:"DevOps & Cloud", name:"k3s (désactivé)", version:PLACEHOLDER_V_K3S, enabled:PLACEHOLDER_DEVOPS },
   { category:"DevOps & Cloud", name:"Checkov", version:PLACEHOLDER_V_CHECKOV, enabled:PLACEHOLDER_DEVOPS },
   { category:"DevOps & Cloud", name:"tfsec", version:PLACEHOLDER_V_TFSEC, enabled:PLACEHOLDER_DEVOPS },
   { category:"DevOps & Cloud", name:"gitleaks", version:PLACEHOLDER_V_GITLEAKS, enabled:PLACEHOLDER_DEVOPS },
@@ -1994,183 +2095,195 @@ const TOOLS = [
   { category:"DevOps & Cloud", name:"AWS CLI", version:PLACEHOLDER_V_AWSCLI, enabled:PLACEHOLDER_DEVOPS },
   { category:"DevOps & Cloud", name:"gcloud CLI", version:PLACEHOLDER_V_GCLOUD, enabled:PLACEHOLDER_DEVOPS },
 
-  // Data & IA - profil dataops / fullstack
   { category:"Data & IA", name:"JupyterLab", version:PLACEHOLDER_V_JUPYTER, enabled:PLACEHOLDER_DATAOPS },
   { category:"Data & IA", name:"DuckDB", version:PLACEHOLDER_V_DUCKDB, enabled:PLACEHOLDER_DATAOPS },
   { category:"Data & IA", name:"Streamlit", version:PLACEHOLDER_V_STREAMLIT, enabled:PLACEHOLDER_DATAOPS },
   { category:"Data & IA", name:"DVC", version:PLACEHOLDER_V_DVC, enabled:PLACEHOLDER_DATAOPS },
   { category:"Data & IA", name:"Prefect", version:PLACEHOLDER_V_PREFECT, enabled:PLACEHOLDER_DATAOPS },
 
-  // Cybersecurite - profil cybersecurity / fullstack
-  { category:"Cybersecurite", name:"Nuclei", version:PLACEHOLDER_V_NUCLEI, enabled:PLACEHOLDER_CYBER },
-  { category:"Cybersecurite", name:"Metasploit", version:PLACEHOLDER_V_METASPLOIT, enabled:PLACEHOLDER_CYBER },
-  { category:"Cybersecurite", name:"ffuf", version:PLACEHOLDER_V_FFUF, enabled:PLACEHOLDER_CYBER },
-  { category:"Cybersecurite", name:"gobuster", version:PLACEHOLDER_V_GOBUSTER, enabled:PLACEHOLDER_CYBER },
-  { category:"Cybersecurite", name:"Amass", version:PLACEHOLDER_V_AMASS, enabled:PLACEHOLDER_CYBER },
-  { category:"Cybersecurite", name:"sqlmap", version:PLACEHOLDER_V_SQLMAP, enabled:PLACEHOLDER_CYBER },
-  { category:"Cybersecurite", name:"subfinder", version:PLACEHOLDER_V_SUBFINDER, enabled:PLACEHOLDER_CYBER },
-  { category:"Cybersecurite", name:"httpx", version:PLACEHOLDER_V_HTTPX, enabled:PLACEHOLDER_CYBER },
-  { category:"Cybersecurite", name:"feroxbuster", version:PLACEHOLDER_V_FEROXBUSTER, enabled:PLACEHOLDER_CYBER },
-  { category:"Cybersecurite", name:"impacket", version:PLACEHOLDER_V_IMPACKET, enabled:PLACEHOLDER_CYBER },
-  { category:"Cybersecurite (defense)", name:"osquery", version:PLACEHOLDER_V_OSQUERY, enabled:PLACEHOLDER_CYBER },
-  { category:"Cybersecurite (defense)", name:"CrowdSec", version:PLACEHOLDER_V_CROWDSEC, enabled:PLACEHOLDER_CYBER },
-  { category:"Cybersecurite (defense)", name:"Lynis", version:PLACEHOLDER_V_LYNIS, enabled:PLACEHOLDER_CYBER },
+  { category:"Cybersécurité", name:"Nuclei", version:PLACEHOLDER_V_NUCLEI, enabled:PLACEHOLDER_CYBER },
+  { category:"Cybersécurité", name:"Metasploit", version:PLACEHOLDER_V_METASPLOIT, enabled:PLACEHOLDER_CYBER },
+  { category:"Cybersécurité", name:"ffuf", version:PLACEHOLDER_V_FFUF, enabled:PLACEHOLDER_CYBER },
+  { category:"Cybersécurité", name:"gobuster", version:PLACEHOLDER_V_GOBUSTER, enabled:PLACEHOLDER_CYBER },
+  { category:"Cybersécurité", name:"Amass", version:PLACEHOLDER_V_AMASS, enabled:PLACEHOLDER_CYBER },
+  { category:"Cybersécurité", name:"sqlmap", version:PLACEHOLDER_V_SQLMAP, enabled:PLACEHOLDER_CYBER },
+  { category:"Cybersécurité", name:"subfinder", version:PLACEHOLDER_V_SUBFINDER, enabled:PLACEHOLDER_CYBER },
+  { category:"Cybersécurité", name:"httpx", version:PLACEHOLDER_V_HTTPX, enabled:PLACEHOLDER_CYBER },
+  { category:"Cybersécurité", name:"feroxbuster", version:PLACEHOLDER_V_FEROXBUSTER, enabled:PLACEHOLDER_CYBER },
+  { category:"Cybersécurité", name:"impacket", version:PLACEHOLDER_V_IMPACKET, enabled:PLACEHOLDER_CYBER },
+  { category:"Cybersécurité (défense)", name:"osquery", version:PLACEHOLDER_V_OSQUERY, enabled:PLACEHOLDER_CYBER },
+  { category:"Cybersécurité (défense)", name:"CrowdSec", version:PLACEHOLDER_V_CROWDSEC, enabled:PLACEHOLDER_CYBER },
+  { category:"Cybersécurité (défense)", name:"Lynis", version:PLACEHOLDER_V_LYNIS, enabled:PLACEHOLDER_CYBER },
 
-  // Langages - profils devops et dataops
-  { category:"Langages", name:"Go", version:PLACEHOLDER_V_GO, enabled: (PLACEHOLDER_DEVOPS || PLACEHOLDER_DATAOPS) },
-  { category:"Langages", name:"Node.js", version:PLACEHOLDER_V_NODE, enabled: (PLACEHOLDER_DEVOPS || PLACEHOLDER_DATAOPS) },
-  { category:"Langages", name:"Java", version:PLACEHOLDER_V_JAVA, enabled: (PLACEHOLDER_DEVOPS || PLACEHOLDER_DATAOPS) }
+  { category:"Langages", name:"Go", version:PLACEHOLDER_V_GO, enabled:(PLACEHOLDER_DEVOPS || PLACEHOLDER_DATAOPS) },
+  { category:"Langages", name:"Node.js", version:PLACEHOLDER_V_NODE, enabled:(PLACEHOLDER_DEVOPS || PLACEHOLDER_DATAOPS) },
+  { category:"Langages", name:"Java", version:PLACEHOLDER_V_JAVA, enabled:(PLACEHOLDER_DEVOPS || PLACEHOLDER_DATAOPS) }
 ];
 
-function buildUrl(s){
-  // Un service tunnelOnly n'est jamais ouvert dans le NSG : le lien pointe
-  // vers 127.0.0.1 (votre poste), valide une fois le tunnel SSH etabli.
-  const host = s.tunnelOnly ? "127.0.0.1" : HOST;
-  return (s.https ? "https://" : "http://") + host + ":" + s.port;
+const $ = id => document.getElementById(id);
+const svg = p => `<svg viewBox="0 0 24 24" aria-hidden="true">${p}</svg>`;
+function esc(str){
+  return String(str).replace(/[&<>"']/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
+}
+function svcUrl(s){ return (s.https ? "https://" : "http://") + HOST + ":" + s.port + (s.path || ""); }
+
+// -- Copie : navigator.clipboard n'existe pas en HTTP (hors localhost), d'ou
+// le repli execCommand, indispensable puisque cette page est servie en HTTP.
+function fallbackCopy(text){
+  const ta = document.createElement("textarea");
+  ta.value = text; ta.setAttribute("readonly", "");
+  ta.style.cssText = "position:fixed;top:-1000px;opacity:0";
+  document.body.appendChild(ta); ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch(e) {}
+  document.body.removeChild(ta);
+  return ok;
+}
+function copyText(text){
+  if(navigator.clipboard && window.isSecureContext){
+    return navigator.clipboard.writeText(text).then(() => true).catch(() => fallbackCopy(text));
+  }
+  return Promise.resolve(fallbackCopy(text));
+}
+let toastTimer;
+function toast(msg){
+  const t = $("toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("show"), 1600);
+}
+document.addEventListener("click", e => {
+  const b = e.target.closest("[data-copy]");
+  if(!b) return;
+  copyText(b.dataset.copy).then(ok => toast(ok ? (b.dataset.msg || "Copié") : "Copie impossible : sélectionnez le texte manuellement"));
+});
+
+// -- En-tete
+const SSH_CMD = `ssh -i keys/${VM_NAME}_id_rsa ${ADMIN_USER}@${HOST}`;
+$("vm-name").textContent = VM_NAME === "<vm_name>" ? "Machine virtuelle" : VM_NAME;
+$("profile-name").textContent = PROFILE_LABELS[PROFILE] || PROFILE;
+$("ip").textContent = HOST;
+$("ssh").textContent = SSH_CMD;
+$("ip-copy").innerHTML = svg(COPY_PATHS);
+$("ip-copy").dataset.copy = HOST;  $("ip-copy").dataset.msg = "Adresse IP copiée";
+$("ssh-copy").innerHTML = svg(COPY_PATHS);
+$("ssh-copy").dataset.copy = SSH_CMD;  $("ssh-copy").dataset.msg = "Commande SSH copiée";
+
+// -- Lignes de services
+function makeRow(s){
+  const url = svcUrl(s);
+  const row = document.createElement("div");
+  row.className = "svc";
+  row.dataset.search = (s.name + " " + s.desc + " " + s.port + " " + s.group).toLowerCase();
+  const cmd = s.cmd
+    ? `<div class="cmd"><code>${esc(s.cmd)}</code><button class="btn sm" data-copy="${esc(s.cmd)}" data-msg="Commande copiée" aria-label="Copier la commande de lancement de ${esc(s.name)}" title="Copier la commande">${svg(COPY_PATHS)}</button></div>`
+    : "";
+  row.innerHTML = `
+    <div class="ic">${svg(ICONS[s.key] || GENERIC_ICON)}</div>
+    <div class="main"><div class="name">${esc(s.name)}</div><div class="desc">${esc(s.desc)}</div>${cmd}</div>
+    <div class="url" title="${esc(url)}">${esc(url)}</div>
+    <div class="st checking" id="st-${s.key}"><span class="dot"></span><span class="lbl">Vérification…</span></div>
+    <div class="act">
+      <a class="btn primary" href="${esc(url)}" target="_blank" rel="noopener noreferrer" aria-label="Ouvrir ${esc(s.name)}">${svg(EXT_PATHS)}Ouvrir</a>
+      <button class="btn icon" data-copy="${esc(url)}" data-msg="Lien copié" aria-label="Copier le lien de ${esc(s.name)}" title="Copier le lien">${svg(COPY_PATHS)}</button>
+    </div>`;
+  return row;
 }
 
-function sshTunnelCmd(s){
-  return `ssh -L ${s.port}:localhost:${s.port} -i keys/<vm_name>_id_rsa ${ADMIN_USER}@${HOST}`;
-}
+const ACTIVE = SERVICES.filter(s => s.enabled);
 
-function svgIcon(paths, cls){
-  return `<svg class="${cls||''}" viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
-}
-
-function makeCard(s, index){
-  const url = buildUrl(s);
-  const card = document.createElement("div");
-  card.className = "card";
-  card.style.animationDelay = (index * 90) + "ms";
-
-  const copyTarget = s.tunnelOnly ? sshTunnelCmd(s) : url;
-  const copyLabel = s.tunnelOnly ? "Copier la commande tunnel" : "Copier";
-  const statusHtml = s.tunnelOnly
-    ? `<span class="dot tunnel"></span><span>tunnel SSH</span>`
-    : `<span class="dot checking" id="dot-${s.key}"></span><span id="label-${s.key}">verif.</span>`;
-
-  card.innerHTML = `
-    <div class="card-top">
-      <div class="card-id">
-        <div class="icon-box">${svgIcon(ICONS[s.key] || GENERIC_ICON)}</div>
-        <div class="card-title">${s.name}</div>
-      </div>
-      <div class="status">${statusHtml}</div>
-    </div>
-    <div class="desc">${s.desc}</div>
-    <div class="row">
-      <a class="btn primary" href="${url}" target="_blank" rel="noopener">
-        ${svgIcon('<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14L21 3"/>')}
-        Ouvrir
-      </a>
-      <button class="btn" data-copy="${escapeHtml(copyTarget)}">
-        ${svgIcon('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>')}
-        ${copyLabel}
-      </button>
-    </div>
-    <div class="url-line">${url}</div>
-    ${s.tunnelOnly ? `<div class="tunnel-note">Non expose publiquement. Ouvrez un tunnel : <code>${escapeHtml(sshTunnelCmd(s))}</code> puis cliquez "Ouvrir".</div>` : ``}
-  `;
-
-  card.querySelector("[data-copy]").addEventListener("click", function(){
-    navigator.clipboard.writeText(copyTarget).then(() => {
-      const btn = this;
-      const original = btn.innerHTML;
-      btn.innerHTML = svgIcon('<path d="M20 6L9 17l-5-5"/>') + "Copie !";
-      setTimeout(() => { btn.innerHTML = original; }, 1600);
-    });
-  });
-
-  return card;
-}
-
-function checkStatus(s){
-  const dot = document.getElementById("dot-" + s.key);
-  const label = document.getElementById("label-" + s.key);
-  if(!dot) return Promise.resolve(false);
-  const url = buildUrl(s);
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 2500);
-  return fetch(url, { mode:"no-cors", signal:controller.signal })
-    .then(() => { clearTimeout(timer); dot.className = "dot up"; label.textContent = "en ligne"; return true; })
-    .catch(() => { clearTimeout(timer); dot.className = "dot down"; label.textContent = "injoignable"; return false; });
-}
-
-function updateCount(active){
-  // Les services tunnelOnly ne sont jamais verifies depuis le navigateur
-  // (127.0.0.1 depuis le poste de l'utilisateur, toujours injoignable sans
-  // tunnel actif) : ils sont exclus du compteur "en ligne".
-  const checkable = active.filter(s => !s.tunnelOnly);
-  Promise.all(checkable.map(checkStatus)).then(results => {
-    const up = results.filter(Boolean).length;
-    document.getElementById("count-badge").textContent = up + " / " + checkable.length + " services en ligne";
-  });
-}
-
-function tickClock(){
-  const el = document.getElementById("clock-badge");
-  if(el) el.textContent = new Date().toLocaleTimeString("fr-FR");
-}
-
-function escapeHtml(str){
-  const d = document.createElement("div");
-  d.textContent = str;
-  return d.innerHTML;
-}
-
-function renderTools(){
-  const wrap = document.getElementById("tools-wrap");
-  wrap.innerHTML = "";
-  const active = TOOLS.filter(t => t.enabled);
-
-  if(active.length === 0){
-    wrap.innerHTML = '<div class="empty">Aucun outil supplementaire pour ce profil.</div>';
+function renderServices(){
+  const host = $("services");
+  host.innerHTML = "";
+  if(ACTIVE.length === 0){
+    host.innerHTML = '<div class="empty">Aucun service web pour ce profil.</div>';
     return;
   }
-
-  const categories = [];
-  active.forEach(t => { if(!categories.includes(t.category)) categories.push(t.category); });
-
-  categories.forEach((cat, i) => {
-    const box = document.createElement("div");
-    box.className = "tool-category";
-    box.style.animationDelay = (i * 90) + "ms";
-
-    const list = active.filter(t => t.category === cat);
-    const chips = list.map(t => {
-      const v = (t.version || "").trim();
-      const cls = v ? "tool-chip" : "tool-chip na";
-      const versionHtml = v ? escapeHtml(v) : "-";
-      return `<span class="${cls}"><span class="t-name">${escapeHtml(t.name)}</span><span class="t-version">${versionHtml}</span></span>`;
-    }).join("");
-
-    box.innerHTML = `<h3><span class="cat-dot"></span>${escapeHtml(cat)}</h3><div class="tool-list">${chips}</div>`;
-    wrap.appendChild(box);
+  const groups = [];
+  ACTIVE.forEach(s => { if(!groups.includes(s.group)) groups.push(s.group); });
+  groups.forEach(g => {
+    const items = ACTIVE.filter(s => s.group === g);
+    const sec = document.createElement("section");
+    sec.className = "group";
+    sec.innerHTML = `<h2>${esc(g)} <span>${items.length}</span></h2><div class="list"></div>`;
+    const list = sec.querySelector(".list");
+    items.forEach(s => list.appendChild(makeRow(s)));
+    host.appendChild(sec);
   });
 }
 
-function render(){
-  document.getElementById("profile-name").textContent = PROFILE;
-  const grid = document.getElementById("grid");
-  grid.innerHTML = "";
-  const active = SERVICES.filter(s => s.enabled);
-
-  if(active.length === 0){
-    grid.innerHTML = '<div class="empty">Aucun service web pour ce profil.</div>';
-    document.getElementById("count-badge").textContent = "0 service";
-  } else {
-    active.forEach((s, i) => grid.appendChild(makeCard(s, i)));
-    updateCount(active);
-    setInterval(() => updateCount(active), 15000);
-  }
-
-  renderTools();
-
-  tickClock();
-  setInterval(tickClock, 1000);
+// -- Etat des services
+const STATES = {
+  up:       ["up",       "En ligne"],
+  down:     ["down",     "Hors ligne"],
+  idle:     ["",         "Non démarré"],
+  cert:     ["warn",     "À vérifier"],
+  checking: ["checking", "Vérification…"]
+};
+function setState(s, key){
+  const el = $("st-" + s.key); if(!el) return;
+  const [cls, label] = STATES[key];
+  el.className = "st " + cls;
+  el.querySelector(".lbl").textContent = label;
+  el.title = key === "cert" ? "Certificat auto-signé : ouvrez le lien et acceptez l'avertissement du navigateur."
+           : key === "idle" ? "Installé mais non démarré. Lancez la commande indiquée sur la VM ; le port est déjà ouvert." : "";
+}
+function probe(s){
+  const c = new AbortController();
+  const t = setTimeout(() => c.abort(), 3000);
+  return fetch(svcUrl(s), { mode:"no-cors", cache:"no-store", signal:c.signal })
+    .then(() => { clearTimeout(t); return true; })
+    .catch(() => { clearTimeout(t); return false; });
+}
+function refresh(){
+  // Chaque ligne est mise a jour des que sa verification aboutit.
+  return Promise.all(ACTIVE.map(s => probe(s).then(ok => {
+    setState(s, ok ? "up" : (s.manual ? "idle" : (s.https ? "cert" : "down")));
+    return [s, ok];
+  }))).then(results => {
+    let up = 0, total = 0;
+    results.forEach(([s, ok]) => {
+      // Les services a lancer a la main ou en HTTPS auto-signe ne comptent pas :
+      // leur etat n'est pas une anomalie / n'est pas mesurable depuis le navigateur.
+      if(!s.manual && !s.https){ total++; if(ok) up++; }
+    });
+    const st = $("sum-st");
+    st.className = "st " + (total === 0 || up === total ? "up" : (up === 0 ? "down" : "warn"));
+    $("sum-txt").textContent = total === 0 ? "Aucun service à vérifier" : `${up} sur ${total} services en ligne`;
+    $("sum-time").textContent = "Vérifié à " + new Date().toLocaleTimeString("fr-FR");
+    $("notice").hidden = !(total > 0 && up === 0);
+  });
 }
 
-render();
+// -- Filtre
+$("filter").addEventListener("input", e => {
+  const q = e.target.value.trim().toLowerCase();
+  let visible = 0;
+  document.querySelectorAll(".svc").forEach(r => {
+    const show = !q || r.dataset.search.includes(q);
+    r.hidden = !show; if(show) visible++;
+  });
+  document.querySelectorAll(".group").forEach(g => { g.hidden = !g.querySelector(".svc:not([hidden])"); });
+  $("no-match").hidden = visible !== 0;
+});
+
+// -- Inventaire des logiciels
+function renderTools(){
+  const wrap = $("tools-wrap");
+  const active = TOOLS.filter(t => t.enabled);
+  const cats = [];
+  active.forEach(t => { if(!cats.includes(t.category)) cats.push(t.category); });
+  wrap.innerHTML = cats.map(cat => {
+    const rows = active.filter(t => t.category === cat).map(t => {
+      const v = (t.version || "").trim();
+      return `<li class="${v ? "" : "na"}"><span>${esc(t.name)}</span><span>${v ? esc(v) : "non détecté"}</span></li>`;
+    }).join("");
+    return `<div><h3>${esc(cat)}</h3><ul>${rows}</ul></div>`;
+  }).join("");
+}
+
+renderServices();
+renderTools();
+refresh();
+setInterval(refresh, 20000);
 </script>
 </body>
 </html>
@@ -2182,7 +2295,7 @@ DASHBOARD_EOF
 # brute contient des guillemets) qui casseraient une substitution sed/JS.
 # json.dumps() produit une chaine JS toujours valide, quel que soit le
 # contenu - y compris une chaine vide si l'outil n'est pas installe.
-PROFILE="$VM_PROFILE" ADMIN_USER="$ADMIN_USER" \
+PROFILE="$VM_PROFILE" ADMIN_USER="$ADMIN_USER" PUBLIC_IP="$VM_PUBLIC_IP" VM_NAME="$VM_NAME" \
 DATAOPS_ON="$DATAOPS_ON" DEVOPS_ON="$DEVOPS_ON" CYBER_ON="$CYBER_ON" \
 V_DOCKER="$V_DOCKER" V_GIT="$V_GIT" V_PYTHON="$V_PYTHON" \
 V_KUBECTL="$V_KUBECTL" V_HELM="$V_HELM" V_K9S="$V_K9S" V_KIND="$V_KIND" \
@@ -2203,7 +2316,7 @@ python3 - << 'PYEOF'
 import json, os
 
 path = "/var/www/html/index.html"
-with open(path) as f:
+with open(path, encoding="utf-8") as f:
     content = f.read()
 
 # Booleens : substitues tels quels (true/false), pas de guillemets JS.
@@ -2218,7 +2331,7 @@ for token, value in bool_map.items():
 # Chaines : converties en litteral JS sur via json.dumps (gere guillemets,
 # antislashs, chaine vide, etc. sans jamais casser la syntaxe JS).
 string_vars = [
-    "PROFILE", "ADMIN_USER",
+    "PROFILE", "ADMIN_USER", "PUBLIC_IP", "VM_NAME",
     "V_DOCKER", "V_GIT", "V_PYTHON",
     "V_KUBECTL", "V_HELM", "V_K9S", "V_KIND",
     "V_TERRAFORM", "V_TERRAGRUNT", "V_PACKER", "V_ANSIBLE", "V_TFLINT",
@@ -2242,7 +2355,7 @@ for name in sorted(string_vars, key=len, reverse=True):
     value = os.environ.get(name, "") or ""
     content = content.replace(token, json.dumps(value))
 
-with open(path, "w") as f:
+with open(path, "w", encoding="utf-8") as f:
     f.write(content)
 
 remaining = content.count("PLACEHOLDER_")
@@ -2260,6 +2373,7 @@ fi
 
 chown -R "$ADMIN_USER:$ADMIN_USER" "$HOME_DIR"
 chown -R "$ADMIN_USER:$ADMIN_USER" "$DATA_MOUNT" 2>/dev/null || true
+fix_docker_access
 
 echo ""
 echo "=============================================="
